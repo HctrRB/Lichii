@@ -274,6 +274,12 @@ PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, 
         return PixelFormat::ASTC_2D_6X5_UNORM;
     case Hash(TextureFormat::ASTC_2D_6X5, UNORM, SRGB):
         return PixelFormat::ASTC_2D_6X5_SRGB;
+    case Hash(TextureFormat::Y8_VIDEO, UNORM):
+    case Hash(TextureFormat::Y8_VIDEO, UNORM, SRGB):
+        return PixelFormat::R8_UNORM;
+    }
+    if (format == TextureFormat::Y8_VIDEO) {
+        return PixelFormat::R8_UNORM;
     }
     UNIMPLEMENTED_MSG("texture format={} srgb={} components={{{} {} {} {}}}",
                       static_cast<int>(format), is_srgb, static_cast<int>(red),
