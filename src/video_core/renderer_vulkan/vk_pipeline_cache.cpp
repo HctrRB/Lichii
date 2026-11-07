@@ -1051,16 +1051,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
 
         const u64 hash = key.Hash();
-<<<<<<< HEAD
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
-        if (!PreloadAllPipelines() &&
-=======
-        disk_pipelines.insert(hash);
         // Switch 2 titles stutter on pipelines built mid-game, so all of them are built at boot.
         if (!PreloadAllPipelines() && !Settings::CurrentProgramIsSwitch2() &&
->>>>>>> 0ba4606e2 (Revert "Revert "vk_pipeline_cache: keep Switch 2 pipelines built"")
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
