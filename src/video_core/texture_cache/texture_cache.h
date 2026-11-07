@@ -3230,8 +3230,32 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
     if (gpu_addr == 0) {
         return ImageViewId{};
     }
+<<<<<<< HEAD
     const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
     return FindRenderTargetView(info, gpu_addr);
+=======
+    ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    // Ocarina of Time renders its shadow maps with the width aligned up to 16 (800x793), then
+    // samples them as the square texture they are (793x793) at the same address. Two images meant
+    // a copy between them for each new size, and these change every frame while the camera moves.
+    if (info.format == VideoCore::Surface::PixelFormat::D32_FLOAT && info.type == ImageType::e2D &&
+        info.size.width != info.size.height && info.size.width == Common::AlignUp(info.size.height, 16U)) {
+        info.size.width = info.size.height;
+    }
+    // A square depth target with no color target is a shadow map: its size doesn't set the output
+    // resolution, and scaling it only multiplies its memory by the square of the scale (648 MiB for
+    // Ocarina of Time's 12288x12288 sun shadow map at 1.5x). A full-screen depth prepass isn't square.
+    const bool shadow_map = regs.rt_control.count == 0 && info.size.width == info.size.height;
+    if (shadow_map) {
+        info.rescaleable = false;
+    }
+    const ImageViewId view_id = FindRenderTargetView(info, gpu_addr);
+    if (shadow_map && view_id && view_id != NULL_IMAGE_VIEW_ID) {
+        // The image may exist already, made when a texture read it first.
+        slot_images[slot_image_views[view_id].image_id].info.rescaleable = false;
+    }
+    return view_id;
+>>>>>>> 7de529dc4 (texture_cache: keep shadow maps at native resolution)
 }
 
 template <class P>
