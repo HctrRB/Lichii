@@ -2961,7 +2961,7 @@ private:
             ++m_dropped_in_a_row;
         }
         const Decoded& front = m_decoded.front();
-        return m_decoded.size() == 1 && !m_inputs.empty() && !front.end &&
+        return m_decoded.size() == 1 && !m_inputs.Empty() && !front.end &&
                m_dropped_in_a_row < MaxDroppedInARow && front.pts + m_frame_interval < *due;
     }
 

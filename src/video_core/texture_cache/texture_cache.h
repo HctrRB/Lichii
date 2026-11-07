@@ -3286,6 +3286,10 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     bool delete_state = has_deleted_images;
     do {
         has_deleted_images = false;
+        inserting_render_target = true;
+        SCOPE_EXIT {
+            inserting_render_target = false;
+        };
         image_id = FindOrInsertImage(info, gpu_addr);
         delete_state |= has_deleted_images;
     } while (has_deleted_images);

@@ -707,6 +707,7 @@ TEST_CASE("NUP edits default-language metadata in place", "[nup]") {
             FileSys::Nup::EditResult::Success);
     INFO(error);
 
+    {
     FileSys::RealVfsFilesystem real;
     FileSys::NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
     REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
@@ -715,6 +716,7 @@ TEST_CASE("NUP edits default-language metadata in place", "[nup]") {
     REQUIRE(nup.GetPackages()[0].publisher == "After Inc");
     REQUIRE(nup.GetPackages()[0].display_version == "2.0.0");
     REQUIRE(nup.GetPackages()[0].icon == std::vector<u8>{0x89, 0x50, 0x4E, 0x47});
+    }
 
     const auto probed = FileSys::Nup::ProbeNupMetadata(archive);
     REQUIRE(probed.title_name == "After");
@@ -727,12 +729,14 @@ TEST_CASE("NUP edits default-language metadata in place", "[nup]") {
     REQUIRE(FileSys::Nup::EditNupMetadata(archive, clear, &error) ==
             FileSys::Nup::EditResult::Success);
     INFO(error);
+    {
     FileSys::RealVfsFilesystem real2;
     FileSys::NupContainer cleared{real2.OpenFile(archive.string(), FileSys::OpenMode::Read)};
     REQUIRE(cleared.GetStatus() == Loader::ResultStatus::Success);
     REQUIRE(cleared.GetPackages()[0].title_name.empty());
     REQUIRE(cleared.GetPackages()[0].icon.empty());
     REQUIRE(cleared.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    }
     REQUIRE(ReadAll(archive) != before);
 
     FileSys::Nup::MetadataEdit noop;
