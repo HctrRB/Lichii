@@ -95,8 +95,12 @@ TEST_CASE("Core pinning: 8 cores, 16 threads", "[common][core_pinning]") {
     CHECK(plan.performance_cores == 8);
     CHECK(plan.front == Ids(2, 2));
     CHECK(plan.back == Ids(4, 2));
-    CHECK(plan.guest == Concat(Ids(0, 2), Ids(6, 10)));
-    CHECK(plan.background == plan.guest);
+    CHECK(plan.guest == Ids(6, 8));
+    CHECK(plan.guest_cores[0] == Ids(6, 2));
+    CHECK(plan.guest_cores[1] == Ids(8, 2));
+    CHECK(plan.guest_cores[2] == Ids(10, 2));
+    CHECK(plan.guest_cores[3] == Ids(12, 2));
+    CHECK(plan.background == Concat(Ids(0, 2), Ids(14, 2)));
     CheckCoresAreDedicated(processors, plan);
 }
 

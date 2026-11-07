@@ -6,6 +6,9 @@
 
 #include <chrono>
 #include <thread>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#endif
 
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -30,6 +33,16 @@
 namespace VideoCommon::GPUThread {
 
 namespace {
+
+void SpinPause() noexcept {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
 
 // Tells a CPU thread waiting in PushCommand that its command ran.
 void SignalCommand(SynchState& state, u64 fence, bool block) {
@@ -90,10 +103,15 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     constexpr std::chrono::microseconds ShortPollInterval{50};
                     constexpr std::chrono::seconds IdleFallbackThreshold{2};
                     constexpr std::chrono::milliseconds LongPollInterval{1};
+                    constexpr u32 PauseBurstIterations = 32;
                     Profile::Scope scope{Profile::Zone::PendingSleep};
                     const auto waited = std::chrono::steady_clock::now() - last_progress;
                     if (waited < SpinWindow) {
-                        std::this_thread::yield();
+                        // Stay in user space on the dedicated GPUFront core instead of issuing
+                        // SwitchToThread() kernel transitions on every semaphore poll.
+                        for (u32 spin = 0; spin < PauseBurstIterations; ++spin) {
+                            SpinPause();
+                        }
                     } else if (waited < IdleFallbackThreshold) {
                         Common::MicroSleep(ShortPollInterval);
                     } else {

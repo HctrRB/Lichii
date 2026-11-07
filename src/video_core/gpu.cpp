@@ -11,10 +11,14 @@
 #include <list>
 #include <memory>
 #include <utility>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#endif
 
 #include "common/assert.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "common/thread.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/gpu_dirty_memory_manager.h"
@@ -32,6 +36,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
@@ -234,12 +239,60 @@ struct GPU::Impl {
         gpu_thread.FlushRegion(addr, size, is_async);
     }
 
+    [[nodiscard]] static bool WaitForPendingBufferDownload(
+        VideoCore::RasterizerInterface* const rasterizer, const DAddr flush_addr,
+        const u64 flush_size) {
+        if (!rasterizer->HasPendingBufferDownload(flush_addr, flush_size)) {
+            return false;
+        }
+        // Prompt GPUBack to submit any deferred fence flush and let GPUFencingThread complete
+        // PopAsyncBuffers without queuing a cross-thread RequestSyncOperation / Finish stall.
+        VideoCommon::GpuSplit::Get().RequestIdleHook();
+        constexpr u32 MaxPausePolls = 4;
+        constexpr u32 PauseBurstIterations = 16;
+        for (u32 poll = 0; poll < MaxPausePolls; ++poll) {
+            for (u32 spin = 0; spin < PauseBurstIterations; ++spin) {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+                _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+                __builtin_ia32_pause();
+#else
+                std::this_thread::yield();
+#endif
+            }
+            if (!rasterizer->MustFlushRegion(flush_addr, flush_size,
+                                             VideoCommon::CacheType::BufferCache)) {
+                return true;
+            }
+        }
+        constexpr u32 MaxMicroSleepPolls = 3;
+        constexpr std::chrono::microseconds PollSleepInterval{50};
+        for (u32 sleep_step = 0;
+             sleep_step < MaxMicroSleepPolls &&
+             rasterizer->HasPendingBufferDownload(flush_addr, flush_size);
+             ++sleep_step) {
+            Common::MicroSleep(PollSleepInterval);
+            if (!rasterizer->MustFlushRegion(flush_addr, flush_size,
+                                             VideoCommon::CacheType::BufferCache)) {
+                return true;
+            }
+        }
+        return !rasterizer->MustFlushRegion(flush_addr, flush_size,
+                                            VideoCommon::CacheType::BufferCache);
+    }
+
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
-        auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
+        auto* const rasterizer = renderer->ReadRasterizer();
+        auto raster_area = rasterizer->GetFlushArea(addr, size);
         if (raster_area.preemtive) {
             return raster_area;
         }
         raster_area.preemtive = true;
+        const DAddr flush_addr = raster_area.start_address;
+        const u64 flush_size = raster_area.end_address - raster_area.start_address;
+        if (WaitForPendingBufferDownload(rasterizer, flush_addr, flush_size)) {
+            return raster_area;
+        }
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
         // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
         if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {

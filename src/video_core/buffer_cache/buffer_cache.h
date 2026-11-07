@@ -150,13 +150,8 @@ void BufferCache<P>::TickFrame() {
         total_used_memory = runtime.GetDeviceMemoryUsage();
     }
     if (gpu_memory != nullptr && gpu_memory->UsesNativeTiling()) {
-        // Cards with >=10 GiB VRAM hold Kakariko-scale Switch 2 buffer working sets (~560 MiB)
-        // without thrashing camera-view geometry at the 512 MiB 8 GiB-card ceiling.
-        const bool high_vram_device = runtime.GetDeviceLocalMemory() >= HighVramDeviceThreshold;
-        const u64 soft_limit = high_vram_device ? HighVramBufferSoftLimit : u64{512_MiB};
-        const u64 hard_limit = high_vram_device ? HighVramBufferHardLimit : u64{1_GiB};
-        if (buffer_bytes >= soft_limit) {
-            RunGarbageCollector(buffer_bytes >= hard_limit);
+        if (buffer_bytes >= NativeTilingBufferSoftLimit) {
+            RunGarbageCollector(buffer_bytes >= NativeTilingBufferHardLimit);
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
@@ -340,10 +335,9 @@ void BufferCache<P>::NoteCpuReadRange(DAddr aligned_start, DAddr aligned_end, bo
             any_tracked = true;
         }
     }
-    // Seed a small bounded lookahead inside the same buffer when the guest walks pages
-    // sequentially (Switch 2 readback ring buffers), preventing a cold stall on every new page.
-    if (!any_tracked || !AsyncReadTrapPrefetchEnabled() || first_page == 0 ||
-        !cpu_read_page_ticks.contains(first_page - 1)) {
+    // Seed a bounded 16 KiB lookahead inside the same buffer when the guest advances across
+    // pages at stride 1..RingReadLookaheadPages (Switch 2 readback ring buffers).
+    if (!any_tracked || !AsyncReadTrapPrefetchEnabled() || first_page == 0) {
         return;
     }
     const DAddr tail_page_addr = aligned_end - Core::DEVICE_PAGESIZE;
@@ -352,6 +346,18 @@ void BufferCache<P>::NoteCpuReadRange(DAddr aligned_start, DAddr aligned_end, bo
         return;
     }
     const Buffer& buffer = slot_buffers[buffer_id];
+    const u64 buffer_first_page = buffer.CpuAddr() >> Core::DEVICE_PAGEBITS;
+    bool has_predecessor = false;
+    for (u32 stride = 1; stride <= RingReadLookaheadPages && first_page >= stride; ++stride) {
+        const u64 prev_page = first_page - stride;
+        if (prev_page >= buffer_first_page && cpu_read_page_ticks.contains(prev_page)) {
+            has_predecessor = true;
+            break;
+        }
+    }
+    if (!has_predecessor) {
+        return;
+    }
     const DAddr buffer_end =
         Common::AlignDown(buffer.CpuAddr() + buffer.SizeBytes(), Core::DEVICE_PAGESIZE);
     const DAddr lookahead_end = (std::min)(
@@ -390,6 +396,10 @@ void BufferCache<P>::PruneStaleCpuReadRanges() {
 
 template <class P>
 void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
+    if (!IsRegionGpuModified(device_addr, size)) {
+        download_cpu_read_ranges = false;
+        return;
+    }
     if constexpr (USE_MEMORY_MAPS) {
         if (download_cpu_read_ranges) {
             download_cpu_read_ranges = false;
@@ -1161,6 +1171,19 @@ bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     // One lookup instead of visiting every range inside (~4% of the GPU thread for title 1's
     // inline uploads once GPU-written ranges are no longer cleared by downloads).
     return gpu_modified_ranges.Intersects(addr, size);
+}
+
+template <class P>
+bool BufferCache<P>::HasPendingDownload(const DAddr addr, const u64 size) const noexcept {
+    if (size == 0) {
+        return false;
+    }
+    for (const auto& ranges : pending_download_ranges) {
+        if (ranges.Intersects(addr, size)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 template <class P>
@@ -2711,7 +2734,26 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         for (BufferCopy& copy : copies) {
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
-            device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            if (const u8* const span = device_memory.GetSpan(device_addr, copy.size);
+                span != nullptr) [[likely]] {
+                std::memcpy(src_pointer, span, copy.size);
+            } else {
+                // Copy mapped pages and zero-fill unmapped tail pages without error-log walks.
+                u64 offset = 0;
+                while (offset < copy.size) {
+                    const DAddr cur_addr = device_addr + offset;
+                    const u64 page_rem =
+                        Core::DEVICE_PAGESIZE - (cur_addr & Core::DEVICE_PAGEMASK);
+                    const u64 chunk = (std::min)(copy.size - offset, page_rem);
+                    if (const u8* const page_ptr = device_memory.template GetPointer<u8>(cur_addr);
+                        page_ptr != nullptr) {
+                        std::memcpy(src_pointer + offset, page_ptr, chunk);
+                    } else {
+                        std::memset(src_pointer + offset, 0, chunk);
+                    }
+                    offset += chunk;
+                }
+            }
             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
             // marks their guest memory cold (see TextureCache::RefreshContents).
             if (copy.size >= 256_KiB) {

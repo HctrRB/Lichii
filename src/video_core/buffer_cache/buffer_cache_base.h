@@ -395,6 +395,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
+    /// Return true when an async fence download is already in flight for this device range.
+    [[nodiscard]] bool HasPendingDownload(DAddr addr, u64 size) const noexcept;
+
     /// Visits the uniform and storage buffers bound for the last draw or dispatch with the cached
     /// host buffer holding each range, if one does, for diagnostics. Nothing is
     /// created or synchronized. Stage 5 is compute.
@@ -759,10 +762,9 @@ private:
 
     static constexpr u64 DefaultCpuReadPageTtlFrames = 90;
     static constexpr u64 CpuReadPagePruneIntervalFrames = 30;
-    static constexpr u32 RingReadLookaheadPages = 2;
-    static constexpr u64 HighVramDeviceThreshold = 10_GiB;
-    static constexpr u64 HighVramBufferSoftLimit = 1_GiB;
-    static constexpr u64 HighVramBufferHardLimit = 1536_MiB;
+    static constexpr u32 RingReadLookaheadPages = 4;
+    static constexpr u64 NativeTilingBufferSoftLimit = 512_MiB;
+    static constexpr u64 NativeTilingBufferHardLimit = 1_GiB;
 
     [[nodiscard]] static u64 CpuReadPageTtlFrames() noexcept {
         static const u64 ttl_frames = [] {

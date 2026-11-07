@@ -120,6 +120,9 @@ enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore, BackgroundWorker };
 /// line, on CPUs with too few cores, with EDEN_HYBRID_CORES=0, and on other hosts.
 void PinCurrentThread(PinnedRole role);
 
+/// Pins one of the 4 emulated guest ARMv8 CPU core host threads to its dedicated physical core.
+void PinCurrentGuestCore(std::size_t core_index);
+
 /// Sub-millisecond sleep that uses a native high-resolution waitable timer on Windows 10 1803+ /
 /// Windows 11 instead of std::this_thread::sleep_for, which MSVC's STL rounds up to >= 1 ms.
 void MicroSleep(std::chrono::microseconds duration);

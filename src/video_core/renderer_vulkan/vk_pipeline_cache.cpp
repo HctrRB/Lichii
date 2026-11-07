@@ -1592,8 +1592,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             job.reset();
             completed_pools->ReleaseContents();
             {
+                constexpr size_t MaxSpareShaderPools = 8;
                 std::scoped_lock lock{spare_pools_mutex};
-                if (spare_pools.size() < 4) {
+                if (spare_pools.size() < MaxSpareShaderPools) {
                     spare_pools.push_back(std::move(completed_pools));
                 }
             }

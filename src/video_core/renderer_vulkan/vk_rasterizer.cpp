@@ -1675,6 +1675,11 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
     return false;
 }
 
+bool RasterizerVulkan::HasPendingBufferDownload(const DAddr addr, const u64 size) {
+    std::scoped_lock lock{buffer_cache.mutex};
+    return buffer_cache.HasPendingDownload(addr, size);
+}
+
 bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
     return query_cache.IsRegionGpuModified(addr, size);
 }

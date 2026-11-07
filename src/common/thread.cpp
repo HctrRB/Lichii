@@ -541,6 +541,7 @@ struct PinnedCpuSets {
     std::vector<ULONG> front;
     std::vector<ULONG> back;
     std::vector<ULONG> guest;
+    std::array<std::vector<ULONG>, Common::GuestCoreCount> guest_cores{};
     std::vector<ULONG> background;
 };
 
@@ -558,10 +559,15 @@ const PinnedCpuSets& GetPinnedCpuSets() {
                  "worker threads on the other {} performance cores ({} guest / {} background "
                  "logical processors)",
                  plan.performance_cores - 2, plan.guest.size(), plan.background.size());
-        return PinnedCpuSets{{plan.front.begin(), plan.front.end()},
+        PinnedCpuSets result{{plan.front.begin(), plan.front.end()},
                              {plan.back.begin(), plan.back.end()},
                              {plan.guest.begin(), plan.guest.end()},
+                             {},
                              {plan.background.begin(), plan.background.end()}};
+        for (std::size_t i = 0; i < Common::GuestCoreCount; ++i) {
+            result.guest_cores[i].assign(plan.guest_cores[i].begin(), plan.guest_cores[i].end());
+        }
+        return result;
     }();
     return pinned;
 }
@@ -706,8 +712,13 @@ void SetCurrentThreadToPerformanceCores() {
 #elif defined(_WIN32)
     if (Settings::values.pin_gpu_threads.GetValue()) {
         const PinnedCpuSets& pinned = GetPinnedCpuSets();
-        if (!pinned.guest.empty()) {
-            SelectCurrentThreadCpuSets(pinned.guest);
+        // On non-hybrid CPUs (e.g. 7800X3D), background cores (Cores 0 & 7) are full-speed
+        // performance cores; routing general performance threads there keeps Cores 3..6 100%
+        // exclusive to the 4 GuestCore threads.
+        const std::vector<ULONG>& target =
+            (!CpuSets().hybrid && !pinned.background.empty()) ? pinned.background : pinned.guest;
+        if (!target.empty()) {
+            SelectCurrentThreadCpuSets(target);
             return;
         }
     }
@@ -742,6 +753,21 @@ void PinCurrentThread(PinnedRole role) {
         LOG_INFO(Common, "GPU thread pinning is only supported on Windows");
         return true;
     }();
+#endif
+}
+
+void PinCurrentGuestCore(const std::size_t core_index) {
+#ifdef _WIN32
+    const PinnedCpuSets& pinned = GetPinnedCpuSets();
+    if (core_index < pinned.guest_cores.size() && !pinned.guest_cores[core_index].empty()) {
+        SelectCurrentThreadCpuSets(pinned.guest_cores[core_index]);
+        return;
+    }
+    if (!pinned.guest.empty()) {
+        SelectCurrentThreadCpuSets(pinned.guest);
+    }
+#else
+    (void)core_index;
 #endif
 }
 

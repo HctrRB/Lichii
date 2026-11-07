@@ -747,6 +747,14 @@ TEST_CASE("Split consumption does not complete deferred downstream callbacks",
         deferred.clear();
     });
     REQUIRE(output == std::array<u32, 3>{1, 2, 3});
+
+    auto payload = std::make_shared<u32>(99);
+    std::weak_ptr<u32> lifetime = payload;
+    u32 observed = 0;
+    split.DeferFunction([payload = std::move(payload), &observed] { observed = *payload; });
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE(observed == 99);
+    REQUIRE(lifetime.expired());
 }
 
 TEST_CASE("Split restart resets writer positions without replaying old releases",

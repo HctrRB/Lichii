@@ -14,10 +14,13 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
     }
     const u8 fastest =
         std::ranges::max(processors, {}, &LogicalProcessor::efficiency_class).efficiency_class;
+    bool has_efficiency_cores = false;
     std::vector<u32> cores;
     for (const LogicalProcessor& processor : processors) {
         if (processor.efficiency_class == fastest) {
             cores.push_back(processor.core);
+        } else {
+            has_efficiency_cores = true;
         }
     }
     std::ranges::sort(cores);
@@ -28,6 +31,29 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
     }
     const u32 front_core = cores[1];
     const u32 back_core = cores[2];
+    // On >=8-core uniform CPUs (e.g. Ryzen 7 7800X3D), isolate the 4 Switch 2 guest cores onto
+    // physical cores 3..6 and place background workers (shader builders, unswizzlers) on cores
+    // 0 and 7+ so background bursts never contend with Dynarmic guest threads.
+    const bool isolate_uniform_background =
+        !has_efficiency_cores && cores.size() >= MinCoresForDedicatedBackground;
+
+    std::array<u32, GuestCoreCount> dedicated_guest_cores{};
+    if (isolate_uniform_background) {
+        for (std::size_t i = 0; i < GuestCoreCount; ++i) {
+            dedicated_guest_cores[i] = cores[3 + i];
+        }
+    } else {
+        std::size_t slot = 0;
+        for (const u32 core_id : cores) {
+            if (core_id == front_core || core_id == back_core) {
+                continue;
+            }
+            if (slot < GuestCoreCount) {
+                dedicated_guest_cores[slot++] = core_id;
+            }
+        }
+    }
+
     for (const LogicalProcessor& processor : processors) {
         if (processor.efficiency_class != fastest) {
             plan.background.push_back(processor.id);
@@ -35,8 +61,27 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
         }
         if (processor.core == front_core) {
             plan.front.push_back(processor.id);
-        } else if (processor.core == back_core) {
+            continue;
+        }
+        if (processor.core == back_core) {
             plan.back.push_back(processor.id);
+            continue;
+        }
+        for (std::size_t i = 0; i < GuestCoreCount; ++i) {
+            if (processor.core == dedicated_guest_cores[i]) {
+                plan.guest_cores[i].push_back(processor.id);
+                break;
+            }
+        }
+        if (isolate_uniform_background) {
+            const bool is_dedicated_guest =
+                std::ranges::find(dedicated_guest_cores, processor.core) !=
+                dedicated_guest_cores.end();
+            if (is_dedicated_guest) {
+                plan.guest.push_back(processor.id);
+            } else {
+                plan.background.push_back(processor.id);
+            }
         } else {
             plan.guest.push_back(processor.id);
         }

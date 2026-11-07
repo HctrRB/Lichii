@@ -750,30 +750,33 @@ TEST_CASE("Native CPU-read tracking prefetches sequential ring lookahead and pru
     f.cache->DownloadMemory(0x20000, 0x1000);
     REQUIRE_FALSE(Access::IsCpuReadTracked(*f.cache, 0x22000, 0x1000));
 
-    // Reading sequential page 0x21000 detects stride from 0x20000 and seeds lookahead [0x22000, 0x24000).
+    // Reading sequential page 0x21000 detects stride from 0x20000 and seeds 4-page lookahead [0x22000, 0x26000).
     const auto ring_p1 = f.cache->GetFlushArea(0x21000, 0x10);
     REQUIRE(ring_p1.has_value());
     REQUIRE_FALSE(ring_p1->preemtive);
     f.cache->DownloadMemory(0x21000, 0x1000);
-    REQUIRE(Access::IsCpuReadTracked(*f.cache, 0x22000, 0x2000));
-    REQUIRE_FALSE(Access::IsCpuReadTracked(*f.cache, 0x24000, 0x1000));
+    REQUIRE(Access::IsCpuReadTracked(*f.cache, 0x22000, 0x4000));
 
-    // Next GPU write to the ring buffer prefetches 0x22000 asynchronously without a cold stall!
+    // Next GPU write to the ring buffer prefetches [0x22000, 0x26000) asynchronously without a cold stall!
     std::fill(ring_bytes.begin(), ring_bytes.end(), u8{0x6b});
     Access::MarkGpuWritten(*f.cache, ring_id, 0x20000, 0x6000);
     f.cache->CommitAsyncFlushes();
+    REQUIRE(f.cache->HasPendingDownload(0x24000, 0x1000));
     for (auto& copy : f.runtime.pending) {
         copy();
     }
     f.runtime.pending.clear();
     f.cache->PopAsyncFlushes();
+    REQUIRE_FALSE(f.cache->HasPendingDownload(0x24000, 0x1000));
 
-    const auto ring_p2 = f.cache->GetFlushArea(0x22000, 0x10);
-    REQUIRE(ring_p2.has_value());
-    REQUIRE(ring_p2->preemtive);
-    REQUIRE(f.bytes[0x12000] == 0x6b);
-    // Warm sequential hit on 0x22000 advances lookahead window to [0x23000, 0x25000).
-    REQUIRE(Access::IsCpuReadTracked(*f.cache, 0x24000, 0x1000));
+    // Even a strided ring jump (+3 pages to 0x24000) hits the prefetched window with zero finishes!
+    const u32 finishes_before_prefetched = f.runtime.finishes;
+    const auto ring_p4 = f.cache->GetFlushArea(0x24000, 0x10);
+    REQUIRE(ring_p4.has_value());
+    REQUIRE(ring_p4->preemtive);
+    REQUIRE(f.bytes[0x14000] == 0x6b);
+    f.cache->DownloadMemory(0x24000, 0x1000);
+    REQUIRE(f.runtime.finishes == finishes_before_prefetched);
 
     // Advance 120 frames while keeping 0x30000 hot every 30 frames; idle ring pages must be pruned.
     for (u32 step = 0; step < 4; ++step) {

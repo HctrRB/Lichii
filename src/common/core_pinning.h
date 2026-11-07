@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -24,15 +25,24 @@ struct LogicalProcessor {
 /// Physical cores of the fastest class needed before the GPU threads are pinned.
 constexpr std::size_t MinCoresForGpuThreadPinning = 6;
 
-/// Logical processor ids for each pinned role. All four are empty when the host has fewer than
+/// Physical cores of the fastest class needed on a uniform (non-hybrid) CPU before the 4 guest
+/// CPU cores and background workers are partitioned onto separate physical cores.
+constexpr std::size_t MinCoresForDedicatedBackground = 8;
+
+/// Number of emulated Switch / Switch 2 physical ARMv8 CPU cores.
+constexpr std::size_t GuestCoreCount = 4;
+
+/// Logical processor ids for each pinned role. All sets are empty when the host has fewer than
 /// MinCoresForGpuThreadPinning performance cores.
 struct GpuThreadPinning {
     std::size_t performance_cores{};
     std::vector<u32> front;
     std::vector<u32> back;
     std::vector<u32> guest;
-    /// Efficiency cores on hybrid CPUs, or the non-GPU guest cores on uniform CPUs so background
-    /// workers never contend with the SMT siblings of the dedicated GPU front/back cores.
+    /// Dedicated physical core CPU-set IDs for each of the 4 guest ARMv8 CPU cores.
+    std::array<std::vector<u32>, GuestCoreCount> guest_cores{};
+    /// Efficiency cores on hybrid CPUs, dedicated non-guest cores (Core 0 + Core 7+) on >=8-core
+    /// uniform CPUs, or the non-GPU guest cores on 6-core uniform CPUs.
     std::vector<u32> background;
 };
 

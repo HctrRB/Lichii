@@ -133,6 +133,12 @@ public:
 
     virtual RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) = 0;
 
+    /// Whether an asynchronous buffer download is already in flight for the range at a fence.
+    [[nodiscard]] virtual bool HasPendingBufferDownload([[maybe_unused]] DAddr addr,
+                                                        [[maybe_unused]] u64 size) {
+        return false;
+    }
+
     /// Whether reports in the range wait for host query results not yet in guest memory.
     [[nodiscard]] virtual bool HasPendingQueries([[maybe_unused]] DAddr addr,
                                                  [[maybe_unused]] u64 size) {

@@ -128,6 +128,9 @@ void GpuSplit::Stop() {
     if (!back_thread.joinable()) {
         return;
     }
+    if (back_running.load(std::memory_order_acquire)) {
+        Drain();
+    }
     back_thread.request_stop();
     wake.fetch_add(1, std::memory_order_seq_cst);
     wake.notify_one();
@@ -298,12 +301,27 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
     }
 }
 
+namespace {
+
+void CallOwnedFunctionThunk(const u64* payload) {
+    auto* const fn = reinterpret_cast<std::function<void()>*>(const_cast<u64*>(payload));
+    (*fn)();
+    std::destroy_at(fn);
+}
+
+} // Anonymous namespace
+
 void GpuSplit::DeferFunction(std::function<void()>&& func) {
-    auto* const heap = new std::function<void()>(std::move(func));
-    Defer([heap] {
-        (*heap)();
-        delete heap;
-    });
+    // Construct std::function directly inside the SPSC ring to avoid cross-core heap allocation
+    // on GPUFront (Core 1) and deallocation on GPUBack (Core 2).
+    static_assert(alignof(std::function<void()>) <= alignof(u64));
+    constexpr size_t payload =
+        (sizeof(std::function<void()>) + sizeof(u64) - 1) / sizeof(u64);
+    u64* const entry = Reserve(2 + payload);
+    entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+    entry[1] = reinterpret_cast<u64>(&CallOwnedFunctionThunk);
+    std::construct_at(reinterpret_cast<std::function<void()>*>(entry + 2), std::move(func));
+    Commit(2 + payload);
 }
 
 size_t GpuSplit::Execute(const u64* entry, size_t words) {
