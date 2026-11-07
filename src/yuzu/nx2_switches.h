@@ -66,7 +66,8 @@ static std::filesystem::path GetSwitchExeDirectory(const char* argv0) {
 static void LoadNx2Switches(const char* argv0) {
     // Later files overwrite earlier entries; the real environment is checked only at the end.
     std::map<std::string, std::string> entries;
-    if (const auto exe_dir = GetSwitchExeDirectory(argv0); !exe_dir.empty()) {
+    const auto exe_dir = GetSwitchExeDirectory(argv0);
+    if (!exe_dir.empty()) {
         ParseSwitchFile(exe_dir / "nx2_switches.txt", entries);
     }
 #ifdef __linux__
@@ -81,6 +82,21 @@ static void LoadNx2Switches(const char* argv0) {
         }
     }
 #endif
+    std::error_code portable_ec;
+    const bool is_portable =
+        !exe_dir.empty() && std::filesystem::is_directory(exe_dir / "user", portable_ec);
+    if (is_portable) {
+        ParseSwitchFile(exe_dir / "user" / "config" / "nx2_switches.txt", entries);
+    } else {
+#ifdef _WIN32
+        const auto config_base = Common::FS::GetAppDataRoamingDirectory();
+#else
+        const auto config_base = Common::FS::GetDataDirectory("XDG_CONFIG_HOME");
+#endif
+        if (config_base.is_absolute()) {
+            ParseSwitchFile(config_base / EDEN_DIR / "nx2_switches.txt", entries);
+        }
+    }
     std::erase_if(entries, [](const auto& entry) {
         const auto& name = entry.first;
         return !(name.starts_with("EDEN_NX2_") || name == "EDEN_DKB_FRAME_TRACE" ||
@@ -91,14 +107,6 @@ static void LoadNx2Switches(const char* argv0) {
                  name == "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
                  name == "EGLANTINE_TEST_VERTEX_REPACK");
     });
-#ifdef _WIN32
-    const auto config_base = Common::FS::GetAppDataRoamingDirectory();
-#else
-    const auto config_base = Common::FS::GetDataDirectory("XDG_CONFIG_HOME");
-#endif
-    if (config_base.is_absolute()) {
-        ParseSwitchFile(config_base / EDEN_DIR / "nx2_switches.txt", entries);
-    }
     for (const auto& [name, value] : entries) {
         if (std::getenv(name.c_str()) != nullptr) {
             continue;

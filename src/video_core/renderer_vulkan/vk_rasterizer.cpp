@@ -2050,6 +2050,18 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
 }
 
 #ifdef EGLANTINE_STREAMLINE
+namespace {
+
+[[nodiscard]] bool OcarinaDlssUpscale4k() noexcept {
+    static const bool upscale_4k = [] {
+        const char* const value = std::getenv("EDEN_NX2_OCARINA_4K");
+        return value != nullptr && value[0] != '0';
+    }();
+    return upscale_4k;
+}
+
+} // namespace
+
 bool RasterizerVulkan::OcarinaDlssEnabled() const {
     constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
     return program_id == ocarina_program && !oot_live_failed &&
@@ -2201,7 +2213,9 @@ bool RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
 /// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
 bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool replace) {
     constexpr u64 depth_reader = 0x1fc7a0423116281fULL;
-    const bool upscale_4k = replace && pipeline.ShaderHash() == ComputePipeline::Ocarina1440pShader;
+    const bool is_1440p_shader =
+        replace && pipeline.ShaderHash() == ComputePipeline::Ocarina1440pShader;
+    const bool upscale_4k = is_1440p_shader && OcarinaDlssUpscale4k();
     if ((!replace && pipeline.ShaderHash() != depth_reader) || !OcarinaDlssEnabled()) {
         return false;
     }
@@ -2266,9 +2280,11 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
     auto& target = texture_cache.GetImageView(written[0]);
     using VideoCore::Surface::PixelFormat;
     const auto extent = oot_motion.extent;
-    const bool valid_extents = upscale_4k
-        ? extent.width == 2560 && extent.height == 1440 &&
-            target.size.width == 2560 && target.size.height == 1440
+    constexpr u32 Native1440pWidth = 2560;
+    constexpr u32 Native1440pHeight = 1440;
+    const bool valid_extents = is_1440p_shader
+        ? extent.width == Native1440pWidth && extent.height == Native1440pHeight &&
+            target.size.width == Native1440pWidth && target.size.height == Native1440pHeight
         : target.size.width == extent.width * 4 / 3 &&
             target.size.height == extent.height * 4 / 3;
     if (!valid_extents || !color.BackingImage() || !target.BackingImage() ||

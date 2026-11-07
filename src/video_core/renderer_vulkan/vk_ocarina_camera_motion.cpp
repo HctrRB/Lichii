@@ -430,9 +430,9 @@ public:
         });
     }
     void RecordOutput(Scheduler& scheduler, const void* descriptors,
-                      const StreamlineDlssUpscaler& upscaler, VkExtent2D extent, u64 frame,
-                      bool reset) {
-        scheduler.Record([this, descriptors, &upscaler, extent, frame, reset](vk::CommandBuffer cmd) {
+                      const StreamlineDlssUpscaler& upscaler, VkExtent2D extent,
+                      bool is_dlaa, u64 frame, bool reset) {
+        scheduler.Record([this, descriptors, &upscaler, extent, is_dlaa, frame, reset](vk::CommandBuffer cmd) {
             if (upscaler.Failed()) {
                 return;
             }
@@ -455,11 +455,20 @@ public:
             };
             cmd.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                 0, after);
+            constexpr u64 TelemetryIntervalFrames = 600;
+            if (!output_logged || frame % TelemetryIntervalFrames == 0) {
+                LOG_INFO(Render_Vulkan, "Ocarina DLSS resolved {}x{} (DLAA={}) frame={}",
+                         extent.width, extent.height, is_dlaa, frame);
+                output_logged = true;
+            }
             if (reset) {
                 LOG_DEBUG(Render_Vulkan, "Ocarina live DLSS replaced native frame={} history_reset={}", frame, reset);
             }
         });
     }
+
+private:
+    bool output_logged{};
 };
 
 class OcarinaCompositePass final : public ComputePass {
@@ -760,8 +769,10 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
         const auto output_sampler = same_size ? sampler : state.LinearSampler();
         state.queue.AddSampledImage(state.upscaler.OutputView(), output_sampler);
         state.queue.AddImage(target);
+        const bool is_dlaa = extent.width == output_extent.width &&
+                             extent.height == output_extent.height;
         state.output_pass.RecordOutput(state.scheduler, state.queue.UpdateData(), state.upscaler,
-                                        target_extent, frame, reset);
+                                        target_extent, is_dlaa, frame, reset);
     }
     state.scheduler.InvalidateState();
     state.last_frame = frame;

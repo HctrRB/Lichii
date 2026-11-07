@@ -42,6 +42,9 @@ struct Buffer : VideoCommon::BufferBase {
     u64 LastUsageTick() const {
         return tick;
     }
+    void setWriteTick(u64 write_tick) {
+        tick = write_tick;
+    }
 
     std::vector<u8> bytes;
     bool host_mapped{};
@@ -78,9 +81,9 @@ struct Runtime {
         return false;
     }
     Staging DownloadStagingBuffer(u64 size, bool = false) {
-        staging = std::make_unique<Buffer>(*this, 0, size + 128, false);
+        auto& allocated = stagings.emplace_back(std::make_unique<Buffer>(*this, 0, size + 128, false));
         ++allocations;
-        return {staging.get(), 128, std::span{staging->bytes}.subspan(128)};
+        return {allocated.get(), 128, std::span{allocated->bytes}.subspan(128)};
     }
     Staging UploadStagingBuffer(u64 size) {
         return DownloadStagingBuffer(size);
@@ -129,6 +132,11 @@ struct Runtime {
         ++host_read_barriers;
         Finish();
     }
+    void PreCopyBarrier() {}
+    void PostCopyBarrier() {}
+    u64 CurrentTick() const {
+        return 1;
+    }
     void BindUniformBuffer(Buffer&, u32, u32) {}
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size) {
         stream.resize(size);
@@ -139,7 +147,7 @@ struct Runtime {
     u32 allocations{}, downloads{}, uploads{}, finishes{}, waits{};
     u32 host_read_barriers{};
     u64 upload_bytes{}, waited_tick{};
-    std::unique_ptr<Buffer> staging;
+    std::vector<std::unique_ptr<Buffer>> stagings;
     std::vector<u8> stream;
     std::vector<std::function<void()>> pending;
     std::function<void()> before_completion;
@@ -234,6 +242,12 @@ struct BufferCacheTestAccess {
     }
     static u32 CpuMarks(Cache& cache) {
         return cache.memory_tracker.cpu_marks;
+    }
+    static void BindMemoryManager(Cache& cache, Tegra::MemoryManager& memory) {
+        cache.gpu_memory = &memory;
+    }
+    static void MarkGpuWritten(Cache& cache, BufferId id, DAddr address, u32 size) {
+        cache.MarkWrittenBuffer(id, address, size, false);
     }
 };
 
@@ -626,4 +640,69 @@ TEST_CASE("Downloads keep CPU writes collected and not yet applied", "[buffer_po
     REQUIRE(f.bytes[0x20ff7] == 0x34);
     REQUIRE(std::all_of(f.bytes + 0x20ff8, f.bytes + 0x21008, [](u8 b) { return b == 0xee; }));
     REQUIRE(f.bytes[0x21008] == 0x34);
+}
+
+TEST_CASE("Native CPU-read pages prefetch asynchronously at fences while keeping trap safety",
+          "[buffer_ports]") {
+    const bool prev_ampere = Tegra::g_nx2_ampere.exchange(true, std::memory_order_relaxed);
+    SCOPE_EXIT {
+        Tegra::g_nx2_ampere.store(prev_ampere, std::memory_order_relaxed);
+    };
+
+    Fixture f;
+    f.memory->EnableNativeTiling();
+    Access::BindMemoryManager(*f.cache, *f.memory);
+    const auto id = Access::Add(*f.cache, 0x20000, 0x4000);
+    auto& host_bytes = Access::Get(*f.cache, id).bytes;
+
+    // Frame 1: cold CPU read records [0x20000, 0x21000) in cpu_read_ranges via reactive flush.
+    std::fill_n(host_bytes.begin(), 0x1000, u8{0x21});
+    Access::MarkGpuWritten(*f.cache, id, 0x20000, 0x1000);
+    const auto first_area = f.cache->GetFlushArea(0x20000, 0x10);
+    REQUIRE(first_area.has_value());
+    REQUIRE_FALSE(first_area->preemtive);
+    f.cache->DownloadMemory(first_area->start_address,
+                            first_area->end_address - first_area->start_address);
+    REQUIRE(f.bytes[0x10000] == 0x21);
+    const u32 finishes_after_cold = f.runtime.finishes;
+
+    // Frame 2 (fast fence path): GPU writes two pages, only the CPU-read page is prefetched at
+    // the fence, and once PopAsyncFlushes completes GetFlushArea succeeds without stalling.
+    std::fill_n(host_bytes.begin(), 0x2000, u8{0x42});
+    Access::MarkGpuWritten(*f.cache, id, 0x20000, 0x2000);
+    REQUIRE(f.cache->HasUncommittedFlushes());
+    f.cache->CommitAsyncFlushes();
+    for (auto& copy : f.runtime.pending) {
+        copy();
+    }
+    f.runtime.pending.clear();
+    f.cache->PopAsyncFlushes();
+    REQUIRE(f.bytes[0x10000] == 0x42);
+    REQUIRE(f.bytes[0x11000] == 0x00);
+
+    const auto prefetched_area = f.cache->GetFlushArea(0x20000, 0x10);
+    REQUIRE(prefetched_area.has_value());
+    REQUIRE(prefetched_area->preemtive);
+    REQUIRE(f.runtime.finishes == finishes_after_cold);
+
+    // Frame 3 (tight race path): CPU reads before PopAsyncFlushes; read trap stays active so
+    // GetFlushArea demands a synchronous flush instead of returning stale bytes.
+    std::fill_n(host_bytes.begin(), 0x1000, u8{0x77});
+    Access::MarkGpuWritten(*f.cache, id, 0x20000, 0x1000);
+    f.cache->CommitAsyncFlushes();
+    const auto raced_area = f.cache->GetFlushArea(0x20000, 0x10);
+    REQUIRE(raced_area.has_value());
+    REQUIRE_FALSE(raced_area->preemtive);
+    f.cache->DownloadMemory(raced_area->start_address,
+                            raced_area->end_address - raced_area->start_address);
+    REQUIRE(f.bytes[0x10000] == 0x77);
+
+    // Late async completion must not overwrite newer guest bytes after ClearDownload.
+    f.bytes[0x10000] = 0x99;
+    for (auto& copy : f.runtime.pending) {
+        copy();
+    }
+    f.runtime.pending.clear();
+    f.cache->PopAsyncFlushes();
+    REQUIRE(f.bytes[0x10000] == 0x99);
 }

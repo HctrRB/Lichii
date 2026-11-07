@@ -691,6 +691,14 @@ private:
         return AsyncBufferDownloads() || memory_tracker.IsRegionPreflushable(device_addr, size);
     }
 
+    [[nodiscard]] static bool AsyncReadTrapPrefetchEnabled() noexcept {
+        static const bool enabled = [] {
+            const char* const value = std::getenv("EDEN_NX2_ASYNC_READ_PREFETCH");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
     /// Queues a GPU write for download at the next fence where DownloadsAtFence holds. With only
     /// Preflushable marks, just the marked pages are queued: a write that covers one marked page
     /// of a large buffer would otherwise copy the whole buffer back at every fence.
@@ -721,6 +729,14 @@ private:
                 queued += upper - lower;
             }
         });
+        // Prefetch recurrently CPU-read pages asynchronously at fences while keeping read traps
+        // armed (`queued` stays untouched) so any read arriving before PopAsyncBuffers still
+        // flushes synchronously instead of observing stale guest memory.
+        if (AsyncReadTrapPrefetchEnabled()) {
+            cpu_read_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+                uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            });
+        }
         if (queued < size) {
             ArmReadTraps(device_addr, size);
         }
