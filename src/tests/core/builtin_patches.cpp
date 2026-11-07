@@ -259,13 +259,13 @@ TEST_CASE("Built-in Dynamic FPS defaults on and can be disabled in Add-Ons", "[p
     auto patched = manager.PatchNSO(nso, "main");
     REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicCallInstruction);
     REQUIRE(WordAt(patched, DynamicRoutineOffset) == 0x1E201828);
-    REQUIRE(WordAt(patched, DynamicRoutineOffset + 116) == 0x3F83D70A);
+    REQUIRE(WordAt(patched, DynamicRoutineOffset + 116) == 0x3CF5C28F);
     REQUIRE(
         Common::HexToString(std::span{patched}.subspan(DynamicRoutineOffset, DynamicRoutineSize)) ==
         "2818201ECA9200B04A0138912BE03BD54C0140F94B0100F9CC0200B46B010CCB0DE03BD5"
         "4E0180D2AE09CE9A7F010EEBCB818B9A4C0540F94C0000B5EC030BAA6E010CCB8C0D8E8B"
-        "4C0500F98201239EA301239E4218231E4208211EC300001C0309231E4020231E4D000054"
-        "4840201EC0035FD60AD7833F");
+        "4C0500F98201239EA301239E4218231E4208211E4338281E63C0201E8400001C6020241E"
+        "48CC281EC0035FD68FC2F53C");
     REQUIRE(WordAt(patched) == BranchInstruction);
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{DynamicFps}};
     REQUIRE_FALSE(enabled());
