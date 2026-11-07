@@ -19,6 +19,7 @@
 #include "common/event_wait.h"
 #include "common/logging.h"
 #include "common/assert.h"
+#include "common/settings.h"
 #include "common/thread.h"
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -535,6 +536,73 @@ void SelectCurrentThreadCpuSets(const std::vector<ULONG>& ids) {
         LOG_WARNING(Common, "SetThreadSelectedCpuSets failed: {}", Common::GetLastErrorMsg());
     }
 }
+
+struct PinnedCpuSets {
+    std::vector<ULONG> front;
+    std::vector<ULONG> back;
+    std::vector<ULONG> guest;
+    std::vector<ULONG> background;
+};
+
+const PinnedCpuSets& GetPinnedCpuSets() {
+    static const PinnedCpuSets pinned = [] {
+        const Common::GpuThreadPinning plan = Common::PlanGpuThreadPinning(CpuSets().processors);
+        if (plan.front.empty()) {
+            LOG_WARNING(Common,
+                        "GPU thread pinning skipped: {} physical performance cores, needs {}",
+                        plan.performance_cores, Common::MinCoresForGpuThreadPinning);
+            return PinnedCpuSets{};
+        }
+        LOG_INFO(Common,
+                 "GPU thread pinning: front and back on a dedicated physical core each, guest and "
+                 "worker threads on the other {} performance cores ({} guest / {} background "
+                 "logical processors)",
+                 plan.performance_cores - 2, plan.guest.size(), plan.background.size());
+        return PinnedCpuSets{{plan.front.begin(), plan.front.end()},
+                             {plan.back.begin(), plan.back.end()},
+                             {plan.guest.begin(), plan.guest.end()},
+                             {plan.background.begin(), plan.background.end()}};
+    }();
+    return pinned;
+}
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+// Thread-local RAII wrapper for a Windows 10 1803+ high-resolution waitable timer so sub-ms
+// polling loops wake in ~50 us instead of MSVC sleep_for's >= 1 ms Sleep(1) floor.
+class HighResWaitableTimer {
+public:
+    HighResWaitableTimer() noexcept
+        : handle{CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                        TIMER_MODIFY_STATE | SYNCHRONIZE)} {}
+
+    ~HighResWaitableTimer() {
+        if (handle != nullptr) {
+            CloseHandle(handle);
+        }
+    }
+
+    HighResWaitableTimer(const HighResWaitableTimer&) = delete;
+    HighResWaitableTimer& operator=(const HighResWaitableTimer&) = delete;
+
+    [[nodiscard]] bool Sleep(const std::chrono::microseconds duration) const noexcept {
+        if (handle == nullptr) {
+            return false;
+        }
+        constexpr s64 HundredNsPerMicrosecond = 10;
+        LARGE_INTEGER due_time{};
+        due_time.QuadPart = -static_cast<LONGLONG>(duration.count() * HundredNsPerMicrosecond);
+        if (SetWaitableTimer(handle, &due_time, 0, nullptr, nullptr, FALSE) == FALSE) {
+            return false;
+        }
+        return WaitForSingleObject(handle, INFINITE) == WAIT_OBJECT_0;
+    }
+
+private:
+    HANDLE handle{};
+};
 } // Anonymous namespace
 #endif
 
@@ -636,6 +704,13 @@ void SetCurrentThreadToPerformanceCores() {
     }
     SetCurrentThreadCoreGroup(CoreGroup::Performance);
 #elif defined(_WIN32)
+    if (Settings::values.pin_gpu_threads.GetValue()) {
+        const PinnedCpuSets& pinned = GetPinnedCpuSets();
+        if (!pinned.guest.empty()) {
+            SelectCurrentThreadCpuSets(pinned.guest);
+            return;
+        }
+    }
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets(sets.performance);
     }
@@ -644,30 +719,20 @@ void SetCurrentThreadToPerformanceCores() {
 
 void PinCurrentThread(PinnedRole role) {
 #ifdef _WIN32
-    struct PinnedCpuSets {
-        std::vector<ULONG> front;
-        std::vector<ULONG> back;
-        std::vector<ULONG> guest;
-    };
-    static const PinnedCpuSets pinned = [] {
-        const GpuThreadPinning plan = PlanGpuThreadPinning(CpuSets().processors);
-        if (plan.front.empty()) {
-            LOG_WARNING(Common,
-                        "GPU thread pinning skipped: {} physical performance cores, needs {}",
-                        plan.performance_cores, MinCoresForGpuThreadPinning);
-            return PinnedCpuSets{};
+    const PinnedCpuSets& pinned = GetPinnedCpuSets();
+    const std::vector<ULONG>& ids = [role, &pinned]() -> const std::vector<ULONG>& {
+        switch (role) {
+        case PinnedRole::GpuFront:
+            return pinned.front;
+        case PinnedRole::GpuBack:
+            return pinned.back;
+        case PinnedRole::BackgroundWorker:
+            return pinned.background;
+        case PinnedRole::GuestCore:
+        default:
+            return pinned.guest;
         }
-        LOG_INFO(Common,
-                 "GPU thread pinning: front and back on a physical core each, guest cores on the "
-                 "other {} performance cores ({} logical processors)",
-                 plan.performance_cores - 2, plan.guest.size());
-        return PinnedCpuSets{{plan.front.begin(), plan.front.end()},
-                             {plan.back.begin(), plan.back.end()},
-                             {plan.guest.begin(), plan.guest.end()}};
     }();
-    const std::vector<ULONG>& ids = role == PinnedRole::GpuFront  ? pinned.front
-                                    : role == PinnedRole::GpuBack ? pinned.back
-                                                                  : pinned.guest;
     if (!ids.empty()) {
         SelectCurrentThreadCpuSets(ids);
     }
@@ -680,6 +745,19 @@ void PinCurrentThread(PinnedRole role) {
 #endif
 }
 
+void MicroSleep(const std::chrono::microseconds duration) {
+    if (duration.count() <= 0) {
+        return;
+    }
+#ifdef _WIN32
+    thread_local const HighResWaitableTimer timer;
+    if (timer.Sleep(duration)) {
+        return;
+    }
+#endif
+    std::this_thread::sleep_for(duration);
+}
+
 void SetCurrentThreadToEfficiencyCores() {
 #if defined(__ANDROID__)
     if (ADPF::AddCurrentThread(ADPF::Session::Background)) {
@@ -688,6 +766,13 @@ void SetCurrentThreadToEfficiencyCores() {
     }
     SetCurrentThreadCoreGroup(CoreGroup::Efficiency);
 #elif defined(_WIN32)
+    if (Settings::values.pin_gpu_threads.GetValue()) {
+        const PinnedCpuSets& pinned = GetPinnedCpuSets();
+        if (!pinned.background.empty()) {
+            SelectCurrentThreadCpuSets(pinned.background);
+            return;
+        }
+    }
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets(sets.efficiency);
     }
@@ -699,6 +784,13 @@ void SetCurrentThreadToBackgroundWork() {
     ADPF::AddCurrentThread(ADPF::Session::Background);
     SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
 #elif defined(_WIN32)
+    if (Settings::values.pin_gpu_threads.GetValue()) {
+        const PinnedCpuSets& pinned = GetPinnedCpuSets();
+        if (!pinned.background.empty()) {
+            SelectCurrentThreadCpuSets(pinned.background);
+            return;
+        }
+    }
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets({});
     }
@@ -710,6 +802,13 @@ void SetCurrentThreadToAllCores() {
     ADPF::RemoveCurrentThread();
     SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
 #elif defined(_WIN32)
+    if (Settings::values.pin_gpu_threads.GetValue()) {
+        const PinnedCpuSets& pinned = GetPinnedCpuSets();
+        if (!pinned.background.empty()) {
+            SelectCurrentThreadCpuSets(pinned.background);
+            return;
+        }
+    }
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets({});
     }

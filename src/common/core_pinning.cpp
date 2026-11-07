@@ -30,6 +30,7 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
     const u32 back_core = cores[2];
     for (const LogicalProcessor& processor : processors) {
         if (processor.efficiency_class != fastest) {
+            plan.background.push_back(processor.id);
             continue;
         }
         if (processor.core == front_core) {
@@ -39,6 +40,9 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
         } else {
             plan.guest.push_back(processor.id);
         }
+    }
+    if (plan.background.empty()) {
+        plan.background = plan.guest;
     }
     return plan;
 }

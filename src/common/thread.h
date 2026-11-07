@@ -112,12 +112,17 @@ void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();
 
-enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore };
+enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore, BackgroundWorker };
 
 /// The experimental pin_gpu_threads setting (Windows): the split GPU thread's front and back each
-/// get a physical performance core of their own and the guest cores keep off those two. Skipped,
-/// with one log line, on CPUs with too few cores, with EDEN_HYBRID_CORES=0, and on other hosts.
+/// get a physical performance core of their own, while guest, render-worker, and background
+/// threads keep off those two physical cores (including their SMT siblings). Skipped, with one log
+/// line, on CPUs with too few cores, with EDEN_HYBRID_CORES=0, and on other hosts.
 void PinCurrentThread(PinnedRole role);
+
+/// Sub-millisecond sleep that uses a native high-resolution waitable timer on Windows 10 1803+ /
+/// Windows 11 instead of std::this_thread::sleep_for, which MSVC's STL rounds up to >= 1 ms.
+void MicroSleep(std::chrono::microseconds duration);
 
 void RefreshThreadPolicies();
 void PollThreadPolicies();

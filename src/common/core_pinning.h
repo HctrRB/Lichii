@@ -24,13 +24,16 @@ struct LogicalProcessor {
 /// Physical cores of the fastest class needed before the GPU threads are pinned.
 constexpr std::size_t MinCoresForGpuThreadPinning = 6;
 
-/// Logical processor ids for each pinned role. All three are empty when the host has fewer than
+/// Logical processor ids for each pinned role. All four are empty when the host has fewer than
 /// MinCoresForGpuThreadPinning performance cores.
 struct GpuThreadPinning {
     std::size_t performance_cores{};
     std::vector<u32> front;
     std::vector<u32> back;
     std::vector<u32> guest;
+    /// Efficiency cores on hybrid CPUs, or the non-GPU guest cores on uniform CPUs so background
+    /// workers never contend with the SMT siblings of the dedicated GPU front/back cores.
+    std::vector<u32> background;
 };
 
 /// The split GPU thread's front and back each get a whole physical performance core, so no SMT

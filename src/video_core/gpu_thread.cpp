@@ -7,6 +7,10 @@
 #include <chrono>
 #include <thread>
 
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+
 #include "common/assert.h"
 #include "common/dkb_cpu_trace.h"
 #include "common/scope_exit.h"
@@ -51,6 +55,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
     thread = std::jthread([&](std::stop_token stop_token) {
         const Common::DkbCpuTrace::Registration cpu_trace{Common::DkbCpuTrace::Role::GpuCommand};
         Common::SetCurrentThreadName("GPU");
+#ifdef __linux__
+        // The pending-channel polls below sleep 50 us; the default timer slack adds up to 50 more.
+        prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+#endif
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
         if (Settings::values.pin_gpu_threads.GetValue()) {
@@ -74,15 +82,22 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     scheduler.ResumePending(system.GPU());
                 }
                 if (!state.queue.TryPop(next)) {
-                    // The CPU usually releases the semaphore soon after: poll for half a
-                    // millisecond before sleeping, or every wait also waits out a host sleep
-                    // (title 1 waits ~25 times a second).
+                    // The CPU usually releases the semaphore soon after: yield for 500 us, then
+                    // sleep in true 50 us intervals (high-resolution waitable timer on Windows).
+                    // Ocarina of Time suspends channels ~330 times/s; 1 ms host sleeps added up
+                    // to ~17 ms/frame of dead time. Fall back to 1 ms after 2 s (menus/paused).
+                    constexpr std::chrono::microseconds SpinWindow{500};
+                    constexpr std::chrono::microseconds ShortPollInterval{50};
+                    constexpr std::chrono::seconds IdleFallbackThreshold{2};
+                    constexpr std::chrono::milliseconds LongPollInterval{1};
                     Profile::Scope scope{Profile::Zone::PendingSleep};
-                    if (std::chrono::steady_clock::now() - last_progress <
-                        std::chrono::microseconds{500}) {
+                    const auto waited = std::chrono::steady_clock::now() - last_progress;
+                    if (waited < SpinWindow) {
                         std::this_thread::yield();
+                    } else if (waited < IdleFallbackThreshold) {
+                        Common::MicroSleep(ShortPollInterval);
                     } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        std::this_thread::sleep_for(LongPollInterval);
                     }
                     continue;
                 }

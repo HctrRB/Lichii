@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <iterator>
 #include <vector>
+#include <chrono>
 #include <catch2/catch_test_macros.hpp>
 #include "common/core_pinning.h"
+#include "common/thread.h"
 
 namespace {
 
@@ -57,13 +59,15 @@ void CheckSkipped(const Common::GpuThreadPinning& plan) {
     CHECK(plan.front.empty());
     CHECK(plan.back.empty());
     CHECK(plan.guest.empty());
+    CHECK(plan.background.empty());
 }
 
-// Front and back each own one whole core, and no guest processor is an SMT sibling of either.
+// Front and back each own one whole core, and neither guest nor background shares their SMT siblings.
 void CheckCoresAreDedicated(const std::vector<LogicalProcessor>& processors,
                             const Common::GpuThreadPinning& plan) {
     REQUIRE(!plan.front.empty());
     REQUIRE(!plan.back.empty());
+    REQUIRE(!plan.background.empty());
     const u32 front_core = CoreOf(processors, plan.front.front());
     const u32 back_core = CoreOf(processors, plan.back.front());
     CHECK(front_core != back_core);
@@ -74,6 +78,10 @@ void CheckCoresAreDedicated(const std::vector<LogicalProcessor>& processors,
         CHECK(CoreOf(processors, id) == back_core);
     }
     for (const u32 id : plan.guest) {
+        CHECK(CoreOf(processors, id) != front_core);
+        CHECK(CoreOf(processors, id) != back_core);
+    }
+    for (const u32 id : plan.background) {
         CHECK(CoreOf(processors, id) != front_core);
         CHECK(CoreOf(processors, id) != back_core);
     }
@@ -88,6 +96,7 @@ TEST_CASE("Core pinning: 8 cores, 16 threads", "[common][core_pinning]") {
     CHECK(plan.front == Ids(2, 2));
     CHECK(plan.back == Ids(4, 2));
     CHECK(plan.guest == Concat(Ids(0, 2), Ids(6, 10)));
+    CHECK(plan.background == plan.guest);
     CheckCoresAreDedicated(processors, plan);
 }
 
@@ -119,6 +128,7 @@ TEST_CASE("Core pinning: hybrid 8 P-cores with SMT and 16 E-cores", "[common][co
     CHECK(plan.front == Ids(2, 2));
     CHECK(plan.back == Ids(4, 2));
     CHECK(plan.guest == Concat(Ids(0, 2), Ids(6, 10)));
+    CHECK(plan.background == Ids(16, 16));
     CheckCoresAreDedicated(processors, plan);
 }
 
@@ -174,4 +184,13 @@ TEST_CASE("Core pinning: the enumeration order does not change the cores",
     CHECK(Sorted(plan.front) == expected.front);
     CHECK(Sorted(plan.back) == expected.back);
     CHECK(Sorted(plan.guest) == expected.guest);
+    CHECK(Sorted(plan.background) == expected.background);
+}
+
+TEST_CASE("MicroSleep: zero and sub-millisecond waits complete cleanly", "[common][thread]") {
+    Common::MicroSleep(std::chrono::microseconds{0});
+    const auto before = std::chrono::steady_clock::now();
+    Common::MicroSleep(std::chrono::microseconds{50});
+    const auto elapsed = std::chrono::steady_clock::now() - before;
+    CHECK(elapsed >= std::chrono::microseconds{10});
 }

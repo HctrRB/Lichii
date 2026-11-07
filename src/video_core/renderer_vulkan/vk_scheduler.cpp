@@ -227,10 +227,12 @@ bool Scheduler::WaitSubmitted(u64 tick) {
                         tick);
             split.RequestIdleHook();
         }
-        if (spins < 64) {
+        constexpr u32 MaxYieldSpins = 64;
+        constexpr std::chrono::microseconds SubmitPollInterval{50};
+        if (spins < MaxYieldSpins) {
             std::this_thread::yield();
         } else {
-            std::this_thread::sleep_for(std::chrono::microseconds{50});
+            Common::MicroSleep(SubmitPollInterval);
         }
     }
     return true;
