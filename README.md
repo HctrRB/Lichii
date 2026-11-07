@@ -18,25 +18,34 @@ This is an independent fork, not an official release of those upstream projects.
 
 Visit the [official Lichii website](https://lichii.zortos.me) to find games and compare community compatibility reports.
 
-## Lichii OoT 7800X3D Definitive Edition
+## Lichii (Fork para Ryzen 7 7800X3D)
 
-This specialized build branch (`oot-7800x3d-4070s`) provides an optimized, ultra-low-latency deployment of Lichii specifically tailored for *The Legend of Zelda: Ocarina of Time* (Switch 2 Remake, Title ID `0400486024DEC000`) on **AMD Ryzen 7 7800X3D** (8C/16T Zen 4, single CCD, 96 MiB 3D V-Cache) and **NVIDIA GeForce RTX 4070 SUPER (12 GiB GDDR6X)**.
+Esta rama (`oot-7800x3d-4070s`) es un fork de Lichii con adaptaciones de bajo nivel para *The Legend of Zelda: Ocarina of Time* (Switch 2 Remake, Title ID `0400486024DEC000`, v1.1.1 NUP), adaptado para la arquitectura **AMD Ryzen 7 7800X3D** (8C/16T Zen 4, 1 CCD, 96 MiB 3D V-Cache) y **NVIDIA GeForce RTX 4070 SUPER (12 GiB GDDR6X)** con 32 GiB DDR5 en Windows 11.
 
-### Key Architectural Improvements:
-- **Zen 4 Microarchitecture & PGO**: Compiled with LLVM/Clang 22.1.8 using `-march=znver4`, `-mtune=znver4`, ThinLTO (`-flto=thin`), and a dedicated Profile-Guided Optimization (PGO) profile trained on real Ocarina of Time gameplay sessions.
-- **Single-CCD Thread Affinity**: Eliminates cross-core scheduling latency on the 7800X3D by pinning CPU emulation and audio/host services to cores 0-3 while pinning the Vulkan GPU worker threads to cores 4-7.
-- **Native 1440p DLAA (DLSS 310.9.16.0)**: Streamline 2.14.16 integration running native `2560x1440` DLAA (`sl::DLSSMode::eDLAA`, Transformer Preset K) with 16x Anisotropic Filtering and secondary AA disabled, eliminating upscaling distortion while delivering crystal-clear sub-pixel stability.
-- **1 GiB Expanded BufferCache**: Increases soft (960 MiB) and hard (1152 MiB) limits to comfortably accommodate Ocarina of Time's 678–848 MiB memory footprint in Castle Town and Hyrule Field, completely eliminating garbage collection stalls.
-- **50 µs Semaphore Channel Polling**: Ultra-low-latency channel sync in `gpu_thread.cpp` reducing frame presentation variance.
-- **Build 116 Upstream Stability Imports**:
-  - Vulkan disk-cache pipeline eviction protection (`#550`)
-  - Dynamic FPS real-time scaling down to 10 fps (`#584`)
-  - Audio sysmix queue silence protection (`#585`)
-  - Framebuffer device dimension clamping and 64 KiB stream buffer tail padding (`#427`)
-  - Descriptor payload dynamic storage growth (`#495`)
-  - Sharpening anti-aliasing network bypass option (`#616`)
-- **Vulkan Pipeline Cache v54**: Fully compatible with the modern NaN-safe instruction format, resolving legacy storage pointer exceptions.
-- **Comprehensive Documentation**: See [`docs/performance/OOT-7800X3D-OPTIMIZATIONS.md`](docs/performance/OOT-7800X3D-OPTIMIZATIONS.md) for detailed telemetry analysis and runtime switch configuration.
+### Rendimiento real testeado (AMD Ryzen 7 7800X3D + RTX 4070 SUPER, 2560x1440 DLAA):
+| Zona / Escenario | Tasa de fotogramas (FPS) | Tiempo de frame (ms) | Observaciones de telemetría |
+| :--- | :--- | :--- | :--- |
+| **Kakariko Village / Zonas despejadas** | **57.1 – 59.4 FPS** | 16.8 – 17.5 ms | Rendimiento fluido y estable cerca de los 60 FPS objetivo. |
+| **Hyrule Field (vistas abiertas / vegetación)** | **46.8 – 54.3 FPS** | 18.4 – 21.3 ms | Caída provocada por llamadas frecuentes de sincronización CPU (`OnCPURead`). |
+| **Transición de zona / Carga inicial** | **39.9 FPS** (puntual) | ~25.0 ms | Pico transitorio de compilación de pipelines en segundo plano. |
+| **Uso de BufferCache** | **846 – 848 MiB** | — | Estable dentro del margen de 1 GiB (sin tirones de recolección de basura). |
+| **Consumo de VRAM** | **~4.2 GiB / 12 GiB** | — | Margen amplio libre en la RTX 4070 SUPER. |
+
+### Cambios y características del fork:
+- **Compilador Zen 4 + PGO**: Construido con Clang 22.1.8 utilizando `-march=znver4`, `-mtune=znver4`, ThinLTO (`-flto=thin`) y perfil PGO entrenado con partidas reales de OoT.
+- **Afinidad de hilos por núcleos**: Evita saltos entre núcleos del CCD único del 7800X3D asignando hilos de CPU/audio a los núcleos 0-3 y Vulkan/fencing a los núcleos 4-7.
+- **DLAA nativo 1440p (DLSS 310.9.16.0)**: Integración de Streamline a resolución nativa `2560x1440` (DLAA, Preset K), filtrado anisotrópico 16x y sin reescalado forzado a 4K (`EDEN_NX2_OCARINA_4K=0`).
+- **BufferCache ampliado a 1 GiB**: Límites de 960 MiB (soft) y 1152 MiB (hard) para evitar el thrashing de GC que ocurría con los 480 MiB por defecto.
+- **Sondeo de canal a 50 µs**: Menor latencia de sincronización en `gpu_thread.cpp`.
+- **Mejoras upstream de Build 116 incorporadas**:
+  - Protección contra desalojo de pipelines en caché de disco (`#550`).
+  - Escala dinámica de FPS hasta 10 fps (`#584`).
+  - Corrección de silencio en cola sysmix de audio (`#585`).
+  - Límites de dimensiones de framebuffers y margen de stream buffer (`#427`).
+  - Crecimiento dinámico del almacenamiento de descriptores (`#495`).
+  - Opción de bypass de sharpening (`#616`).
+- **Compatibilidad de caché v54**: Protocolo actualizado compatible con instrucciones NaN-safe.
+- **Guía de optimización**: Consulta [`docs/performance/OOT-7800X3D-OPTIMIZATIONS.md`](docs/performance/OOT-7800X3D-OPTIMIZATIONS.md) para más detalles.
 
 ## Downloads and setup
 
