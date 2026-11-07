@@ -1118,8 +1118,26 @@ Common::RangeSet<DAddr> BufferCache<P>::PendingCpuWriteRanges() {
 template <class P>
 void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written,
                                            DAddr device_addr, const u8* data, u64 size) {
+    const auto write_mapped = [this](DAddr addr, const u8* src, u64 total_size) {
+        if (u8* const span = device_memory.GetSpan(addr, total_size);
+            span != nullptr) [[likely]] {
+            std::memcpy(span, src, total_size);
+            return;
+        }
+        u64 offset = 0;
+        while (offset < total_size) {
+            const DAddr cur_addr = addr + offset;
+            const u64 page_rem = Core::DEVICE_PAGESIZE - (cur_addr & Core::DEVICE_PAGEMASK);
+            const u64 chunk = (std::min)(total_size - offset, page_rem);
+            if (u8* const page_ptr = device_memory.template GetPointer<u8>(cur_addr);
+                page_ptr != nullptr) {
+                std::memcpy(page_ptr, src + offset, chunk);
+            }
+            offset += chunk;
+        }
+    };
     if (!cpu_written.Intersects(device_addr, size)) {
-        device_memory.WriteBlockUnsafe(device_addr, data, size);
+        write_mapped(device_addr, data, size);
         return;
     }
     Common::RangeSet<DAddr> parts;
@@ -1128,7 +1146,7 @@ void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_wr
         parts.Subtract(start, end - start);
     });
     parts.ForEach([&](DAddr start, DAddr end) {
-        device_memory.WriteBlockUnsafe(start, data + (start - device_addr), end - start);
+        write_mapped(start, data + (start - device_addr), end - start);
     });
 }
 
