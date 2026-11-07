@@ -712,13 +712,8 @@ void SetCurrentThreadToPerformanceCores() {
 #elif defined(_WIN32)
     if (Settings::values.pin_gpu_threads.GetValue()) {
         const PinnedCpuSets& pinned = GetPinnedCpuSets();
-        // On non-hybrid CPUs (e.g. 7800X3D), background cores (Cores 0 & 7) are full-speed
-        // performance cores; routing general performance threads there keeps Cores 3..6 100%
-        // exclusive to the 4 GuestCore threads.
-        const std::vector<ULONG>& target =
-            (!CpuSets().hybrid && !pinned.background.empty()) ? pinned.background : pinned.guest;
-        if (!target.empty()) {
-            SelectCurrentThreadCpuSets(target);
+        if (!pinned.guest.empty()) {
+            SelectCurrentThreadCpuSets(pinned.guest);
             return;
         }
     }

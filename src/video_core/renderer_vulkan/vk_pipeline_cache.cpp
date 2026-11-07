@@ -398,6 +398,10 @@ size_t GetTotalPipelineWorkers() {
     }
     return std::min(max_core_threads, desired);
 #else
+    if (Settings::values.pin_gpu_threads.GetValue()) {
+        constexpr size_t MaxPinnedPipelineWorkers = 6ULL;
+        return std::min(max_core_threads, MaxPinnedPipelineWorkers);
+    }
     return max_core_threads;
 #endif
 }

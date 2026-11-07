@@ -265,18 +265,6 @@ struct GPU::Impl {
                 return true;
             }
         }
-        constexpr u32 MaxMicroSleepPolls = 3;
-        constexpr std::chrono::microseconds PollSleepInterval{50};
-        for (u32 sleep_step = 0;
-             sleep_step < MaxMicroSleepPolls &&
-             rasterizer->HasPendingBufferDownload(flush_addr, flush_size);
-             ++sleep_step) {
-            Common::MicroSleep(PollSleepInterval);
-            if (!rasterizer->MustFlushRegion(flush_addr, flush_size,
-                                             VideoCommon::CacheType::BufferCache)) {
-                return true;
-            }
-        }
         return !rasterizer->MustFlushRegion(flush_addr, flush_size,
                                             VideoCommon::CacheType::BufferCache);
     }
