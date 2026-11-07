@@ -1,0 +1,277 @@
+name: oot-7800x3d-build
+
+on:
+  push:
+    branches:
+      - oot-7800x3d-4070s
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WINDOWS_LLVM_VERSION: "22.1.8"
+  WINDOWS_LLVM_SHA256: "16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c"
+
+concurrency:
+  group: oot-7800x3d-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-tests:
+    name: Windows clang-cl Unit Tests
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install LLVM on Windows
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'llvm.exe'
+          Invoke-WebRequest -OutFile $installer "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:WINDOWS_LLVM_VERSION/LLVM-$env:WINDOWS_LLVM_VERSION-win64.exe"
+          if ((Get-FileHash -Algorithm SHA256 $installer).Hash -ne $env:WINDOWS_LLVM_SHA256) {
+            throw 'LLVM installer checksum mismatch'
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'llvm'
+          Start-Process -Wait -FilePath $installer -ArgumentList '/S', "/D=$root"
+          "LLVM_ROOT=$($root.Replace('\', '/'))" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Install sccache on Windows
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
+          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
+          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK on Windows
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Restore CPM downloads
+        id: cpm-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/cpm
+          key: cpm-windows-x86_64-v2-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'CMakeModules/CPM*.cmake', 'externals/**/CMakeLists.txt', 'src/**/CMakeLists.txt') }}
+          restore-keys: |
+            cpm-windows-x86_64-v2-
+            cpm-Windows-
+
+      - name: Restore compiler objects
+        id: compiler-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .sccache
+          key: objects-windows-tests-v2-${{ github.sha }}
+          restore-keys: |
+            objects-windows-tests-v2-
+            objects-windows-x86_64-v2-
+
+      - name: Configure Windows Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags="-DWIN32 -D_WINDOWS -DNOMINMAX"
+          cmake -S . -B build/tests -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DYUZU_TESTS=ON \
+            -DDYNARMIC_TESTS=OFF \
+            -DENABLE_QT=OFF \
+            -DYUZU_CMD=OFF \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DENABLE_NVIDIA_DLSS=ON \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
+            "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
+            "-DCMAKE_C_FLAGS=$flags" \
+            "-DCMAKE_CXX_FLAGS=-EHsc $flags"
+
+      - name: Build Windows Tests
+        shell: bash
+        run: |
+          sccache --zero-stats
+          cmake --build build/tests --parallel
+          sccache --show-stats
+
+      - name: Run CTest Suite
+        shell: pwsh
+        run: ctest --test-dir build/tests --output-on-failure --no-tests=error
+
+      - name: Stop sccache
+        if: always()
+        shell: pwsh
+        run: sccache --stop-server
+
+      - name: Save compiler objects
+        if: always() && steps.compiler-cache.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: .sccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+  windows-7800x3d-pgo:
+    name: Windows Zen4 ThinLTO + OoT PGO Binary
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Check OoT PGO profile
+        shell: bash
+        run: test -s lichii-windows.profdata
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install LLVM on Windows
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'llvm.exe'
+          Invoke-WebRequest -OutFile $installer "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:WINDOWS_LLVM_VERSION/LLVM-$env:WINDOWS_LLVM_VERSION-win64.exe"
+          if ((Get-FileHash -Algorithm SHA256 $installer).Hash -ne $env:WINDOWS_LLVM_SHA256) {
+            throw 'LLVM installer checksum mismatch'
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'llvm'
+          Start-Process -Wait -FilePath $installer -ArgumentList '/S', "/D=$root"
+          "LLVM_ROOT=$($root.Replace('\', '/'))" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Install Qt on Windows
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install sccache on Windows
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
+          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
+          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK on Windows
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Restore CPM downloads
+        id: cpm-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/cpm
+          key: cpm-windows-x86_64-v2-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'CMakeModules/CPM*.cmake', 'externals/**/CMakeLists.txt', 'src/**/CMakeLists.txt') }}
+          restore-keys: |
+            cpm-windows-x86_64-v2-
+            cpm-windows-x86_64-pgo-v2-
+            cpm-Windows-
+
+      - name: Restore compiler objects
+        id: compiler-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .sccache
+          key: objects-windows-znver4-pgo-v2-${{ hashFiles('lichii-windows.profdata') }}-${{ github.sha }}
+          restore-keys: |
+            objects-windows-znver4-pgo-v2-${{ hashFiles('lichii-windows.profdata') }}-
+            objects-windows-x86_64-pgo-v2-
+            objects-windows-x86_64-v2-
+
+      - name: Configure Windows Zen4 + ThinLTO + OoT PGO
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin -clang:-march=znver4 -clang:-mtune=znver4"
+          flags+=" -fprofile-use=$(cygpath -m "$PWD/lichii-windows.profdata")"
+          flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"
+          flags+=" -Wno-error=backend-plugin"
+          cmake -S . -B build/release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DYUZU_TESTS=OFF \
+            -DYUZU_CMD=ON \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DENABLE_NVIDIA_DLSS=ON \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -DLICHII_BUILD_TAG=oot-znver4-pgo-${{ github.run_number }} \
+            -DLICHII_BUILD_PLATFORM=windows-x86_64-znver4-pgo \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
+            "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
+            "-DCMAKE_C_FLAGS=$flags" \
+            "-DCMAKE_CXX_FLAGS=-EHsc $flags"
+
+      - name: Save CPM downloads
+        if: steps.cpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/cpm
+          key: ${{ steps.cpm-cache.outputs.cache-primary-key }}
+
+      - name: Build lichii.exe and eden-cli.exe
+        shell: bash
+        run: |
+          sccache --zero-stats
+          cmake --build build/release --target yuzu yuzu-cmd --parallel
+          sccache --show-stats
+
+      - name: Stop sccache
+        if: always()
+        shell: pwsh
+        run: sccache --stop-server
+
+      - name: Save compiler objects
+        if: always() && steps.compiler-cache.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: .sccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Package Windows binary
+        shell: pwsh
+        run: |
+          foreach ($exe in 'lichii.exe', 'eden-cli.exe') {
+            if (-not (Test-Path "build/release/bin/$exe")) {
+              throw "build/release/bin/$exe was not produced"
+            }
+          }
+          windeployqt --release --no-translations build/release/bin/lichii.exe
+
+      - name: Upload Windows Zen4 PGO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-windows-znver4-pgo
+          path: build/release/bin/*
+          if-no-files-found: error
+          retention-days: 14
