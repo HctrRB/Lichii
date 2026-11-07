@@ -73,17 +73,17 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
                 break;
             }
         }
+        plan.guest.push_back(processor.id);
         if (isolate_uniform_background) {
-            const bool is_dedicated_guest =
-                std::ranges::find(dedicated_guest_cores, processor.core) !=
-                dedicated_guest_cores.end();
-            if (is_dedicated_guest) {
-                plan.guest.push_back(processor.id);
-            } else {
+            // Keep Core 3 (CPUCore_0) and Core 4 (CPUCore_1) 100% isolated from background shader
+            // and unswizzle workers alongside Core 1 (GPUFront) and Core 2 (GPUBack), while giving
+            // BackgroundWorkers 4 physical cores (Cores 0, 5, 6, 7 = 8 logical threads).
+            const bool is_primary_guest_core =
+                processor.core == dedicated_guest_cores[0] ||
+                processor.core == dedicated_guest_cores[1];
+            if (!is_primary_guest_core) {
                 plan.background.push_back(processor.id);
             }
-        } else {
-            plan.guest.push_back(processor.id);
         }
     }
     if (plan.background.empty()) {

@@ -764,7 +764,7 @@ private:
     static constexpr u64 CpuReadPagePruneIntervalFrames = 30;
     static constexpr u32 RingReadLookaheadPages = 4;
     static constexpr u64 NativeTilingBufferSoftLimit = 512_MiB;
-    static constexpr u64 NativeTilingBufferHardLimit = 1_GiB;
+    static constexpr u64 NativeTilingBufferHardLimit = 640_MiB;
 
     [[nodiscard]] static u64 CpuReadPageTtlFrames() noexcept {
         static const u64 ttl_frames = [] {

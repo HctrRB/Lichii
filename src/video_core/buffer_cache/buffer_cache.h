@@ -73,23 +73,24 @@ template <class P>
 void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
     const u64 ticks_to_destroy = aggressive_gc ? 60 : 120;
     int num_iterations = aggressive_gc ? 64 : 32;
+    int scan_budget = 256;
     // Their GPU-written data is downloaded first, all with one wait for the GPU: one wait per
     // buffer stalled the GPU thread every frame on title 1 (an 8 GB GPU near its budget, no
     // per-fence downloads keeping the buffers clean), ~2.5% of its time.
     boost::container::small_vector<BufferId, 64> evicted;
     lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, [&](BufferId buffer_id) {
-        if (num_iterations == 0) {
+        if (num_iterations == 0 || scan_budget == 0) {
             return true;
         }
-        --num_iterations;
-        // Below the critical threshold, buffers holding GPU-written data stay: evicting one
-        // means downloading it first. The thresholds compare the whole device's use (mostly
-        // textures) with fixed headroom, so on an 8 GB GPU the collector ran every frame once a
-        // title 1 course was loaded, and the downloads were ~2.7% of the GPU thread.
+        --scan_budget;
+        // Below the critical threshold, buffers holding GPU-written data stay; only count actual
+        // evictions toward num_iterations so old GPU-modified buffers at the LRU head cannot block
+        // eviction of clean buffers behind them across multi-zone transitions.
         const Buffer& buffer = slot_buffers[buffer_id];
         if (!aggressive_gc && gpu_modified_ranges.Intersects(buffer.CpuAddr(), buffer.SizeBytes())) {
             return false;
         }
+        --num_iterations;
         evicted.push_back(buffer_id);
         return false;
     });

@@ -126,11 +126,21 @@ public:
                                [&] { return shared->complete.load(std::memory_order_acquire); });
     }
 
-    /// Waits up to `timeout` for the build, without running it on this thread. The worker sets
-    /// `complete` under the mutex before notifying, so the wakeup cannot be lost.
+    /// Waits up to `timeout` for the build. If no worker thread has claimed the task yet, claims
+    /// and runs it directly rather than sleeping idly while it sits at the back of the FIFO queue.
     /// @return True when the pipeline is built.
     bool WaitFor(std::chrono::microseconds timeout) const {
         const auto shared = state;
+        if (shared->complete.load(std::memory_order_acquire)) {
+            return true;
+        }
+        if (timeout > std::chrono::microseconds{0} &&
+            !shared->claimed.load(std::memory_order_acquire)) {
+            shared->Run();
+            if (shared->complete.load(std::memory_order_acquire)) {
+                return true;
+            }
+        }
         std::unique_lock lock{shared->mutex};
         return shared->condition.wait_for(lock, timeout, [&] {
             return shared->complete.load(std::memory_order_acquire);
