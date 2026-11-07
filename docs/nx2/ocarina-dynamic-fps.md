@@ -16,8 +16,7 @@ CTGL's #299 changed one instruction: the delta cap is `CNTFRQ / 10` instead of
 `CNTFRQ / 20`.
 
 The routine's SHA-256 is
-`604165ee7683cd5abf882067186188026e6bd3b4456f0e3fe994f16f47194d32`
-(`0afb4af10a78bb49372e6807fc5b71d9fa99d828b7625f0fab7429fc66a4b1e6` before bidirectional scaling)
+`0afb4af10a78bb49372e6807fc5b71d9fa99d828b7625f0fab7429fc66a4b1e6`
 (`3c15dfb57f748328ad7d1c1675941dc2ace32a5e7b10907368ceac6a9a8c5ee1` before the
 cap change).
 The call's SHA-256 is
@@ -58,16 +57,15 @@ instruction, layout, or truncated module leaves both patch records untouched.
 The routine reads `CNTPCT_EL0` and `CNTFRQ_EL0`. After its first call, it caps
 the timestamp difference at `CNTFRQ / 10`, or 100 ms, then smooths it by adding
 one eighth of the signed difference from the previous smoothed value.
-It calculates `s2 = (smoothed_ticks / CNTFRQ) * s1`. In this fork, the routine
-implements branchless bidirectional scaling: it replaces the original `s8 = s1 / s0`
-whenever `|s2 - s8| > 0.03` using `fcsel`.
-- Near 60 fps (within the +-3% deadband), `s8` stays exact `1.0` for bit-perfect stability.
-- Below 60 fps down to 10 fps (`s2 > 1.03`), `s8` scales up to prevent slow motion.
-- Above 60 fps (`s2 < 0.97`, e.g. 120 fps or unlocked refresh rates), `s8` scales down
-  proportionally (e.g. `s8 = 0.50` at 120 fps) so game physics and animations run at
-  exact 1.0x speed rather than accelerating into 2x fast-forward.
+It calculates `s2 = (smoothed_ticks / CNTFRQ) * s1`. It replaces the original
+`s8 = s1 / s0` only when `s2 > 1.03 * s8`.
 The original code selects `s1` as 30 or 60 and converts the integer field at
 `x21 + 0x2C8` into `s0`, so the result is a frame-step scale, not seconds.
+
+This is not a promise of correct game speed at every frame rate. It retains
+the original step as a floor, caps long frames, and smooths changes. Actual
+gameplay speed and the runtime value of that frame-rate field still require
+live validation.
 
 In Lichii, `CoreTiming::GetClockTicks` scales the counter for CPU Boost and
 Overclock, while Dynarmic's advertised counter frequency stays unchanged.
