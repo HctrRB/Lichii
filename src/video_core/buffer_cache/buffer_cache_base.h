@@ -757,10 +757,34 @@ private:
         });
     }
 
+    static constexpr u64 DefaultCpuReadPageTtlFrames = 90;
+    static constexpr u64 CpuReadPagePruneIntervalFrames = 30;
+    static constexpr u32 RingReadLookaheadPages = 2;
+    static constexpr u64 HighVramDeviceThreshold = 10_GiB;
+    static constexpr u64 HighVramBufferSoftLimit = 1_GiB;
+    static constexpr u64 HighVramBufferHardLimit = 1536_MiB;
+
+    [[nodiscard]] static u64 CpuReadPageTtlFrames() noexcept {
+        static const u64 ttl_frames = [] {
+            const char* const value = std::getenv("EDEN_NX2_CPU_READ_TTL_FRAMES");
+            if (value != nullptr) {
+                return static_cast<u64>(std::strtoull(value, nullptr, 10));
+            }
+            return DefaultCpuReadPageTtlFrames;
+        }();
+        return ttl_frames;
+    }
+
+    void NoteCpuReadRange(DAddr aligned_start, DAddr aligned_end, bool cold_read);
+    void PruneStaleCpuReadRanges();
+
     ReadTrapTracker read_trapped_ranges;
     /// Ranges the guest CPU read after GPU writes. A read that must flush downloads the GPU
     /// writes in all of them, so the reads that usually follow it find nothing left to flush.
     Common::RangeSet<DAddr> cpu_read_ranges;
+    /// Last frame_tick each 4 KiB page in cpu_read_ranges was read by the guest CPU, bounding
+    /// streaming ring-buffer accumulation so stale megabytes are not re-downloaded at every fence.
+    std::unordered_map<u64, u64> cpu_read_page_ticks;
     bool download_cpu_read_ranges{};
     Common::RangeSet<DAddr> gpu_modified_ranges;
     std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;

@@ -150,19 +150,21 @@ void BufferCache<P>::TickFrame() {
         total_used_memory = runtime.GetDeviceMemoryUsage();
     }
     if (gpu_memory != nullptr && gpu_memory->UsesNativeTiling()) {
-        // Switch 2 titles fill the device with textures (their collector watches the budget);
-        // title 1's buffers were ~200 MiB of an 8 GB GPU's ~6.8 GB in use, yet this collector
-        // ran aggressively every frame on the device-wide figure, evicting up to 64 buffers (and
-        // downloading the GPU-written ones, ~5% of the GPU thread) that were recreated later.
-        // Collect when the buffers themselves are large. At 1 GiB it held geometry of scenes
-        // long gone: title 1's title screen grew to ~0.9 GB of buffers in ten minutes.
-        if (buffer_bytes >= 512_MiB) {
-            RunGarbageCollector(buffer_bytes >= 1_GiB);
+        // Cards with >=10 GiB VRAM hold Kakariko-scale Switch 2 buffer working sets (~560 MiB)
+        // without thrashing camera-view geometry at the 512 MiB 8 GiB-card ceiling.
+        const bool high_vram_device = runtime.GetDeviceLocalMemory() >= HighVramDeviceThreshold;
+        const u64 soft_limit = high_vram_device ? HighVramBufferSoftLimit : u64{512_MiB};
+        const u64 hard_limit = high_vram_device ? HighVramBufferHardLimit : u64{1_GiB};
+        if (buffer_bytes >= soft_limit) {
+            RunGarbageCollector(buffer_bytes >= hard_limit);
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
     }
     ++frame_tick;
+    if (frame_tick % CpuReadPagePruneIntervalFrames == 0) {
+        PruneStaleCpuReadRanges();
+    }
     delayed_destruction_ring.Tick();
 
     for (auto& buffer : async_buffers_death_ring) {
@@ -294,7 +296,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         } else {
             if constexpr (USE_MEMORY_MAPS) {
-                cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
+                NoteCpuReadRange(area->start_address, area->end_address, true);
                 download_cpu_read_ranges = true;
             }
             // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
@@ -303,12 +305,87 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         }
     } else {
+        if constexpr (USE_MEMORY_MAPS) {
+            NoteCpuReadRange(device_addr_start_aligned, device_addr_end_aligned, false);
+        }
         // The core keeps this area and has no mark. The next GPU write here must arm the range
         // again, which ends the area and sets the trap.
         read_trapped_ranges.Subtract(device_addr_start_aligned,
                                      device_addr_end_aligned - device_addr_start_aligned);
     }
     return area;
+}
+
+template <class P>
+void BufferCache<P>::NoteCpuReadRange(DAddr aligned_start, DAddr aligned_end, bool cold_read) {
+    if constexpr (!USE_MEMORY_MAPS) {
+        return;
+    }
+    if (aligned_start >= aligned_end) {
+        return;
+    }
+    if (cold_read) {
+        cpu_read_ranges.Add(aligned_start, aligned_end - aligned_start);
+    }
+    const u64 first_page = aligned_start >> Core::DEVICE_PAGEBITS;
+    const u64 end_page = aligned_end >> Core::DEVICE_PAGEBITS;
+    bool any_tracked = cold_read;
+    for (u64 page = first_page; page < end_page; ++page) {
+        if (cold_read) {
+            cpu_read_page_ticks[page] = frame_tick;
+            continue;
+        }
+        if (const auto it = cpu_read_page_ticks.find(page); it != cpu_read_page_ticks.end()) {
+            it->second = frame_tick;
+            any_tracked = true;
+        }
+    }
+    // Seed a small bounded lookahead inside the same buffer when the guest walks pages
+    // sequentially (Switch 2 readback ring buffers), preventing a cold stall on every new page.
+    if (!any_tracked || !AsyncReadTrapPrefetchEnabled() || first_page == 0 ||
+        !cpu_read_page_ticks.contains(first_page - 1)) {
+        return;
+    }
+    const DAddr tail_page_addr = aligned_end - Core::DEVICE_PAGESIZE;
+    const BufferId buffer_id = page_table[tail_page_addr >> CACHING_PAGEBITS];
+    if (!buffer_id) {
+        return;
+    }
+    const Buffer& buffer = slot_buffers[buffer_id];
+    const DAddr buffer_end =
+        Common::AlignDown(buffer.CpuAddr() + buffer.SizeBytes(), Core::DEVICE_PAGESIZE);
+    const DAddr lookahead_end = (std::min)(
+        buffer_end, aligned_end + u64{RingReadLookaheadPages} * Core::DEVICE_PAGESIZE);
+    if (lookahead_end <= aligned_end) {
+        return;
+    }
+    cpu_read_ranges.Add(aligned_end, lookahead_end - aligned_end);
+    const u64 lookahead_end_page = lookahead_end >> Core::DEVICE_PAGEBITS;
+    for (u64 page = end_page; page < lookahead_end_page; ++page) {
+        cpu_read_page_ticks[page] = frame_tick;
+    }
+}
+
+template <class P>
+void BufferCache<P>::PruneStaleCpuReadRanges() {
+    if constexpr (!USE_MEMORY_MAPS) {
+        return;
+    }
+    if (cpu_read_page_ticks.empty()) {
+        return;
+    }
+    const u64 ttl_frames = CpuReadPageTtlFrames();
+    if (ttl_frames == 0) {
+        return;
+    }
+    for (auto it = cpu_read_page_ticks.begin(); it != cpu_read_page_ticks.end();) {
+        if (frame_tick > it->second + ttl_frames) {
+            cpu_read_ranges.Subtract(it->first << Core::DEVICE_PAGEBITS, Core::DEVICE_PAGESIZE);
+            it = cpu_read_page_ticks.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 template <class P>

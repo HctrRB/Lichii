@@ -249,6 +249,17 @@ struct BufferCacheTestAccess {
     static void MarkGpuWritten(Cache& cache, BufferId id, DAddr address, u32 size) {
         cache.MarkWrittenBuffer(id, address, size, false);
     }
+    static void AdvanceFrames(Cache& cache, u64 frames) {
+        for (u64 i = 0; i < frames; ++i) {
+            ++cache.frame_tick;
+            if (cache.frame_tick % Cache::CpuReadPagePruneIntervalFrames == 0) {
+                cache.PruneStaleCpuReadRanges();
+            }
+        }
+    }
+    static bool IsCpuReadTracked(const Cache& cache, DAddr address, u64 size) {
+        return cache.cpu_read_ranges.Intersects(address, size);
+    }
 };
 
 } // namespace VideoCommon
@@ -705,4 +716,80 @@ TEST_CASE("Native CPU-read pages prefetch asynchronously at fences while keeping
     f.runtime.pending.clear();
     f.cache->PopAsyncFlushes();
     REQUIRE(f.bytes[0x10000] == 0x99);
+}
+
+TEST_CASE("Native CPU-read tracking prefetches sequential ring lookahead and prunes stale pages",
+          "[buffer_ports]") {
+    const bool prev_ampere = Tegra::g_nx2_ampere.exchange(true, std::memory_order_relaxed);
+    SCOPE_EXIT {
+        Tegra::g_nx2_ampere.store(prev_ampere, std::memory_order_relaxed);
+    };
+
+    Fixture f;
+    f.memory->EnableNativeTiling();
+    Access::BindMemoryManager(*f.cache, *f.memory);
+    const auto ring_id = Access::Add(*f.cache, 0x20000, 0x6000);
+    const auto hot_id = Access::Add(*f.cache, 0x30000, 0x1000);
+    auto& ring_bytes = Access::Get(*f.cache, ring_id).bytes;
+    auto& hot_bytes = Access::Get(*f.cache, hot_id).bytes;
+
+    // Seed hot fixed page 0x30000 and first two sequential ring pages 0x20000 -> 0x21000.
+    std::fill(ring_bytes.begin(), ring_bytes.end(), u8{0x5a});
+    std::fill(hot_bytes.begin(), hot_bytes.end(), u8{0xa5});
+    Access::MarkGpuWritten(*f.cache, hot_id, 0x30000, 0x1000);
+    Access::MarkGpuWritten(*f.cache, ring_id, 0x20000, 0x6000);
+
+    const auto hot_cold = f.cache->GetFlushArea(0x30000, 0x10);
+    REQUIRE(hot_cold.has_value());
+    REQUIRE_FALSE(hot_cold->preemtive);
+    f.cache->DownloadMemory(0x30000, 0x1000);
+
+    const auto ring_p0 = f.cache->GetFlushArea(0x20000, 0x10);
+    REQUIRE(ring_p0.has_value());
+    REQUIRE_FALSE(ring_p0->preemtive);
+    f.cache->DownloadMemory(0x20000, 0x1000);
+    REQUIRE_FALSE(Access::IsCpuReadTracked(*f.cache, 0x22000, 0x1000));
+
+    // Reading sequential page 0x21000 detects stride from 0x20000 and seeds lookahead [0x22000, 0x24000).
+    const auto ring_p1 = f.cache->GetFlushArea(0x21000, 0x10);
+    REQUIRE(ring_p1.has_value());
+    REQUIRE_FALSE(ring_p1->preemtive);
+    f.cache->DownloadMemory(0x21000, 0x1000);
+    REQUIRE(Access::IsCpuReadTracked(*f.cache, 0x22000, 0x2000));
+    REQUIRE_FALSE(Access::IsCpuReadTracked(*f.cache, 0x24000, 0x1000));
+
+    // Next GPU write to the ring buffer prefetches 0x22000 asynchronously without a cold stall!
+    std::fill(ring_bytes.begin(), ring_bytes.end(), u8{0x6b});
+    Access::MarkGpuWritten(*f.cache, ring_id, 0x20000, 0x6000);
+    f.cache->CommitAsyncFlushes();
+    for (auto& copy : f.runtime.pending) {
+        copy();
+    }
+    f.runtime.pending.clear();
+    f.cache->PopAsyncFlushes();
+
+    const auto ring_p2 = f.cache->GetFlushArea(0x22000, 0x10);
+    REQUIRE(ring_p2.has_value());
+    REQUIRE(ring_p2->preemtive);
+    REQUIRE(f.bytes[0x12000] == 0x6b);
+    // Warm sequential hit on 0x22000 advances lookahead window to [0x23000, 0x25000).
+    REQUIRE(Access::IsCpuReadTracked(*f.cache, 0x24000, 0x1000));
+
+    // Advance 120 frames while keeping 0x30000 hot every 30 frames; idle ring pages must be pruned.
+    for (u32 step = 0; step < 4; ++step) {
+        Access::MarkGpuWritten(*f.cache, hot_id, 0x30000, 0x1000);
+        f.cache->CommitAsyncFlushes();
+        for (auto& copy : f.runtime.pending) {
+            copy();
+        }
+        f.runtime.pending.clear();
+        f.cache->PopAsyncFlushes();
+        const auto hot_hit = f.cache->GetFlushArea(0x30000, 0x10);
+        REQUIRE(hot_hit.has_value());
+        REQUIRE(hot_hit->preemtive);
+        Access::AdvanceFrames(*f.cache, 30);
+    }
+
+    REQUIRE(Access::IsCpuReadTracked(*f.cache, 0x30000, 0x1000));
+    REQUIRE_FALSE(Access::IsCpuReadTracked(*f.cache, 0x20000, 0x6000));
 }
