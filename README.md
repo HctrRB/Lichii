@@ -18,6 +18,26 @@ This is an independent fork, not an official release of those upstream projects.
 
 Visit the [official Lichii website](https://lichii.zortos.me) to find games and compare community compatibility reports.
 
+## Lichii OoT 7800X3D Definitive Edition
+
+This specialized build branch (`oot-7800x3d-4070s`) provides an optimized, ultra-low-latency deployment of Lichii specifically tailored for *The Legend of Zelda: Ocarina of Time* (Switch 2 Remake, Title ID `0400486024DEC000`) on **AMD Ryzen 7 7800X3D** (8C/16T Zen 4, single CCD, 96 MiB 3D V-Cache) and **NVIDIA GeForce RTX 4070 SUPER (12 GiB GDDR6X)**.
+
+### Key Architectural Improvements:
+- **Zen 4 Microarchitecture & PGO**: Compiled with LLVM/Clang 22.1.8 using `-march=znver4`, `-mtune=znver4`, ThinLTO (`-flto=thin`), and a dedicated Profile-Guided Optimization (PGO) profile trained on real Ocarina of Time gameplay sessions.
+- **Single-CCD Thread Affinity**: Eliminates cross-core scheduling latency on the 7800X3D by pinning CPU emulation and audio/host services to cores 0-3 while pinning the Vulkan GPU worker threads to cores 4-7.
+- **Native 1440p DLAA (DLSS 310.9.16.0)**: Streamline 2.14.16 integration running native `2560x1440` DLAA (`sl::DLSSMode::eDLAA`, Transformer Preset K) with 16x Anisotropic Filtering and secondary AA disabled, eliminating upscaling distortion while delivering crystal-clear sub-pixel stability.
+- **1 GiB Expanded BufferCache**: Increases soft (960 MiB) and hard (1152 MiB) limits to comfortably accommodate Ocarina of Time's 678–848 MiB memory footprint in Castle Town and Hyrule Field, completely eliminating garbage collection stalls.
+- **50 µs Semaphore Channel Polling**: Ultra-low-latency channel sync in `gpu_thread.cpp` reducing frame presentation variance.
+- **Build 116 Upstream Stability Imports**:
+  - Vulkan disk-cache pipeline eviction protection (`#550`)
+  - Dynamic FPS real-time scaling down to 10 fps (`#584`)
+  - Audio sysmix queue silence protection (`#585`)
+  - Framebuffer device dimension clamping and 64 KiB stream buffer tail padding (`#427`)
+  - Descriptor payload dynamic storage growth (`#495`)
+  - Sharpening anti-aliasing network bypass option (`#616`)
+- **Vulkan Pipeline Cache v54**: Fully compatible with the modern NaN-safe instruction format, resolving legacy storage pointer exceptions.
+- **Comprehensive Documentation**: See [`docs/performance/OOT-7800X3D-OPTIMIZATIONS.md`](docs/performance/OOT-7800X3D-OPTIMIZATIONS.md) for detailed telemetry analysis and runtime switch configuration.
+
 ## Downloads and setup
 
 Published builds belong on this fork's [releases page](https://github.com/zortos293/Eglantine/releases). The repository still uses its historical Eglantine name; the desktop application is now Lichii.

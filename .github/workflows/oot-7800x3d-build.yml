@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   WINDOWS_LLVM_VERSION: "22.1.8"
@@ -268,10 +268,27 @@ jobs:
           }
           windeployqt --release --no-translations build/release/bin/lichii.exe
 
+      - name: Compress Windows Zen4 PGO package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/release/bin/* -DestinationPath build/release/lichii-windows-znver4-pgo.zip -Force
+
       - name: Upload Windows Zen4 PGO Artifact
         uses: actions/upload-artifact@v4
         with:
           name: lichii-windows-znver4-pgo
-          path: build/release/bin/*
+          path: build/release/lichii-windows-znver4-pgo.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish Public GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v1.1-oot-7800x3d-b${GITHUB_RUN_NUMBER}"
+          echo "Publishing public release $tag..."
+          gh release create "$tag" build/release/lichii-windows-znver4-pgo.zip \
+            --title "Lichii OoT 7800X3D Definitive ($tag)" \
+            --notes "Public release of Lichii for Zelda: Ocarina of Time on AMD Ryzen 7 7800X3D + NVIDIA RTX 4070 SUPER. Features: Zen 4 (-march=znver4), ThinLTO, custom OoT PGO profile, Streamline DLSS 310.9.16 DLAA Preset K, 1 GiB BufferCache, and Build 116 stability imports." 
