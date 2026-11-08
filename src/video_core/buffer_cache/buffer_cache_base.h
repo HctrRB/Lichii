@@ -724,24 +724,36 @@ private:
         }
         const DAddr end = device_addr + size;
         u64 queued = 0;
+        Common::RangeSet<DAddr> queued_ranges;
         memory_tracker.ForEachPreflushableRange(device_addr, size, [&](DAddr begin, u64 length) {
             const DAddr lower = (std::max)(begin, device_addr);
             const DAddr upper = (std::min)(begin + length, end);
             if (lower < upper) {
                 uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+                queued_ranges.Add(lower, upper - lower);
                 queued += upper - lower;
             }
         });
-        // Prefetch recurrently CPU-read pages asynchronously at fences while keeping read traps
-        // armed (`queued` stays untouched) so any read arriving before PopAsyncBuffers still
-        // flushes synchronously instead of observing stale guest memory.
+        // Prefetch recurrently CPU-read pages asynchronously at fences.
         if (AsyncReadTrapPrefetchEnabled()) {
             cpu_read_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
                 uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+                queued_ranges.Add(lower, upper - lower);
+                queued += upper - lower;
             });
         }
         if (queued < size) {
-            ArmReadTraps(device_addr, size);
+            // Arm read traps only on ranges not already queued for download at fences.
+            DAddr last_unarmed = device_addr;
+            queued_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+                if (last_unarmed < lower) {
+                    ArmReadTraps(last_unarmed, lower - last_unarmed);
+                }
+                last_unarmed = (std::max)(last_unarmed, upper);
+            });
+            if (last_unarmed < end) {
+                ArmReadTraps(last_unarmed, end - last_unarmed);
+            }
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
             Nx2DownloadTrace::Queued(device_addr, size, queued);

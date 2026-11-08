@@ -1202,7 +1202,7 @@ bool BufferCache<P>::HasPendingDownload(const DAddr addr, const u64 size) const 
             return true;
         }
     }
-    return false;
+    return uncommitted_gpu_modified_ranges.Intersects(addr, size);
 }
 
 template <class P>

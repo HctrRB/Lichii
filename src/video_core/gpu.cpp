@@ -248,8 +248,8 @@ struct GPU::Impl {
         // Prompt GPUBack to submit any deferred fence flush and let GPUFencingThread complete
         // PopAsyncBuffers without queuing a cross-thread RequestSyncOperation / Finish stall.
         VideoCommon::GpuSplit::Get().RequestIdleHook();
-        constexpr u32 MaxPausePolls = 4;
-        constexpr u32 PauseBurstIterations = 16;
+        constexpr u32 MaxPausePolls = 8;
+        constexpr u32 PauseBurstIterations = 32;
         for (u32 poll = 0; poll < MaxPausePolls; ++poll) {
             for (u32 spin = 0; spin < PauseBurstIterations; ++spin) {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
