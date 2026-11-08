@@ -327,8 +327,16 @@ struct Memory::Impl {
     }
 
     [[nodiscard]] inline const u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
+        if (size == 0) [[unlikely]] {
+            return GetPointerSilent(addr);
+        }
+        const VAddr end_addr = addr + size - 1;
+        // Fast-path: spans within a single 4 KiB virtual page are inherently contiguous in host memory.
+        if ((addr >> YUZU_PAGEBITS) == (end_addr >> YUZU_PAGEBITS)) [[likely]] {
+            return GetPointerSilent(addr);
+        }
         const auto first = current_page_table->entries[addr >> YUZU_PAGEBITS].Block();
-        const auto last = current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block();
+        const auto last = current_page_table->entries[end_addr >> YUZU_PAGEBITS].Block();
         if (Common::PageTable::PageEntryData::CanFastSpan(first, last)) {
             return GetPointerSilent(addr);
         }
@@ -339,8 +347,16 @@ struct Memory::Impl {
         return GetContiguousSpan(addr, size);
     }
     [[nodiscard]] inline u8* GetSpan(const VAddr addr, const std::size_t size) noexcept {
+        if (size == 0) [[unlikely]] {
+            return GetPointerSilent(addr);
+        }
+        const VAddr end_addr = addr + size - 1;
+        // Fast-path: spans within a single 4 KiB virtual page are inherently contiguous in host memory.
+        if ((addr >> YUZU_PAGEBITS) == (end_addr >> YUZU_PAGEBITS)) [[likely]] {
+            return GetPointerSilent(addr);
+        }
         const auto first = current_page_table->entries[addr >> YUZU_PAGEBITS].Block();
-        const auto last = current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block();
+        const auto last = current_page_table->entries[end_addr >> YUZU_PAGEBITS].Block();
         if (Common::PageTable::PageEntryData::CanFastSpan(first, last)) {
             return GetPointerSilent(addr);
         }
@@ -695,18 +711,34 @@ struct Memory::Impl {
 
             page_table.entries.ZeroRegion(base, end);
         } else {
-            u64 mapping_id = block_count.load(std::memory_order_relaxed);
-            constexpr u64 exhausted_count =
-                u64{Common::PageTable::PageEntryData::INVALID_BLOCK_ID} + 1;
-            while (mapping_id < exhausted_count &&
-                   !block_count.compare_exchange_weak(mapping_id, mapping_id + 1,
-                                                      std::memory_order_relaxed)) {
+            u16 current_block = Common::PageTable::PageEntryData::INVALID_BLOCK_ID;
+            // Reuse block ID if contiguous to the previous mapped page with identical host base pointer
+            if (base > 0 && page_table.entries[base - 1].Type() == type) {
+                const auto& prev_entry = page_table.entries[base - 1];
+                const auto expected_ptr =
+                    reinterpret_cast<u64>(system.DeviceMemory().GetPointer<u8>(target)) -
+                    (base << YUZU_PAGEBITS);
+                if (prev_entry.Pointer() == expected_ptr &&
+                    prev_entry.Block() != Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
+                    current_block = prev_entry.Block();
+                }
             }
-            const u16 current_block =
-                Common::PageTable::PageEntryData::BlockIdForMapping(mapping_id);
-            if (mapping_id == Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
-                LOG_WARNING(HW_Memory,
-                            "Page table block ids are exhausted; validating spans page by page");
+            if (current_block == Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
+                u64 mapping_id = block_count.load(std::memory_order_relaxed);
+                constexpr u64 exhausted_count =
+                    u64{Common::PageTable::PageEntryData::INVALID_BLOCK_ID} + 1;
+                while (mapping_id < exhausted_count &&
+                       !block_count.compare_exchange_weak(mapping_id, mapping_id + 1,
+                                                          std::memory_order_relaxed)) {
+                }
+                current_block = Common::PageTable::PageEntryData::BlockIdForMapping(mapping_id);
+                if (mapping_id == Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
+                    static bool logged = false;
+                    if (!std::exchange(logged, true)) {
+                        LOG_WARNING(HW_Memory,
+                                    "Page table block ids are exhausted; validating spans page by page");
+                    }
+                }
             }
 
             page_table.entries.CommitRegion(base, end);

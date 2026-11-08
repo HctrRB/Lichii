@@ -802,17 +802,21 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, image_barrier);
     });
-    // Each decode ends with a submit to the host GPU. Measured here
-    // (count and time per 5 s); EDEN_NX2_ASTC_FLUSH=0 waits for the host GPU to go idle instead.
-    static const bool flush_only = [] {
+    // Each decode ends with a submit to the host GPU unless batching is enabled (EDEN_NX2_ASTC_FLUSH=2).
+    // Batched mode lets ASTC compute dispatches execute within the frame's existing command buffer
+    // and pipeline barriers, eliminating up to 155 fragmented vkQueueSubmit calls per second.
+    static const int flush_mode = [] {
         const char* value = std::getenv("EDEN_NX2_ASTC_FLUSH");
-        return value == nullptr || value[0] != '0';
+        if (value != nullptr && (value[0] == '2' || value[0] == 'b' || value[0] == 'B')) {
+            return 2; // Batched: no per-decode submit
+        }
+        return value == nullptr || value[0] != '0' ? 1 : 0;
     }();
-    if (!target.wait) {
+    if (!target.wait || flush_mode == 2) {
         return;
     }
     const auto start = std::chrono::steady_clock::now();
-    if (flush_only) {
+    if (flush_mode == 1) {
         scheduler.Flush();
     } else {
         scheduler.Finish();
@@ -827,7 +831,7 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
         LOG_INFO(Render_Vulkan, "ASTC GPU decodes: {} in {} ms, {} ms waiting ({})", decodes,
                  std::chrono::duration_cast<std::chrono::milliseconds>(end - window_start).count(),
                  std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(),
-                 flush_only ? "flush" : "finish");
+                 flush_mode == 1 ? "flush" : "finish");
         decodes = 0;
         waited = {};
         window_start = end;

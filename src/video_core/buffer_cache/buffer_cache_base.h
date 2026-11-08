@@ -762,7 +762,8 @@ private:
 
     static constexpr u64 DefaultCpuReadPageTtlFrames = 90;
     static constexpr u64 CpuReadPagePruneIntervalFrames = 30;
-    static constexpr u32 RingReadLookaheadPages = 4;
+    // M8.4: Extended 64 KiB lookahead (16 pages) for Switch 2 ring buffers (OoT 24-48 KiB bursts)
+    static constexpr u32 RingReadLookaheadPages = 16;
     static constexpr u64 NativeTilingBufferSoftLimit = 512_MiB;
     static constexpr u64 NativeTilingBufferHardLimit = 1_GiB;
 
