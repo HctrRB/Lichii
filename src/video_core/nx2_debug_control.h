@@ -46,18 +46,10 @@ namespace VideoCore::Nx2Debug {
 /// reads), 10 = on and verify every skipped read against the drained path, 0 = off.
 inline std::atomic<int> g_dma_snapshot{-1};
 
-/// EDEN_NX2_SEM_FAST (PR #231): resolve waiting semaphore acquires without draining the GPU
-/// split's back. 0 = off, 1 = resume completed latches without drain, 2 = bounded deferral (up to
-/// 15 polls / 1 ms).
-inline std::atomic<int> g_sem_fast{-1};
-
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
     if (name == "EDEN_NX2_DMA_SNAPSHOT") {
         return &g_dma_snapshot;
-    }
-    if (name == "EDEN_NX2_SEM_FAST") {
-        return &g_sem_fast;
     }
     return nullptr;
 }
