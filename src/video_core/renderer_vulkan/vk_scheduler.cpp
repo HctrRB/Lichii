@@ -185,7 +185,9 @@ bool Scheduler::DeferFlush() {
     // kept the Vulkan worker busy submitting. Batched within 500 us: ~10-15% more fps there.
     // Command list copies after dispatches were ~9,000 more a second, of which the front waited
     // for about 5%.
-    static constexpr s64 DefaultFenceFlushIntervalUs = 250;
+    // 0 by default (EvilOOT's flash fix): Ocarina of Time flashed white with the fence batch,
+    // and ran faster without it (Lake Hylia 52.3 -> 55.4 fps). EDEN_NX2_FENCE_FLUSH_US=250 restores it.
+    static constexpr s64 DefaultFenceFlushIntervalUs = 0;
     static const s64 interval_us = [] {
         const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
         if (value != nullptr) {

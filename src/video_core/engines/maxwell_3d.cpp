@@ -11,6 +11,8 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include "video_core/nx2_debug_control.h"
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/scope_exit.h"
@@ -1048,9 +1050,24 @@ struct Maxwell3D::FrontState {
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
     /// The back's draw manager is in an instance loop (DrawMode::Instance): draw.end does nothing.
     bool instance_loop{};
+    bool upload_known{};
+    u64 upload_device{};
+    u32 upload_size{};
+    u32 upload_offset{};
+    /// Macro DMA read snapshots (EDEN_NX2_DMA_SNAPSHOT, from EvilOOT's dma-snapshot fix): device
+    /// pages a drained read flushed whole, and the split position right after. Cleared past 8192
+    /// pages.
+    std::unordered_map<u64, u64> dma_snapshots;
 };
 
 namespace {
+
+// Methods whose execution on the back writes guest memory (inline uploads, reports).
+bool WritesGuestMemory(u32 method) {
+    return method == MAXWELL3D_REG_INDEX(launch_dma) ||
+           method == MAXWELL3D_REG_INDEX(inline_data) ||
+           method == MAXWELL3D_REG_INDEX(report_semaphore.query);
+}
 
 // EDEN_NX2_SPLIT_VERIFY=1: every 4096 front macro calls, wait for the back and compare the
 // front's registers with the back's (logs and resynchronizes differences).
@@ -1231,6 +1248,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         split.Method(this, method, argument, is_last_call, nullptr);
         fs.sink_pending = !execution_mask[method];
     }
+    if (WritesGuestMemory(method)) {
+        FrontNoteMemoryWrite(split, fs, method, &value, 1);
+    }
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
@@ -1339,6 +1359,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
     fs.sink_pending = false; // The back consumes the sink before a run.
+    if (WritesGuestMemory(method) && amount != 0) {
+        FrontNoteMemoryWrite(split, fs, method, base_start, amount);
+    }
 }
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1433,6 +1456,80 @@ bool Maxwell3D::FrontSkipsLoopWrite(FrontState& fs, u32 method, u32 value, bool 
     return method != MAXWELL3D_REG_INDEX(draw.end) || fs.instance_loop;
 }
 
+void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                                     const u32* words, u32 count) {
+    split.NoteMemoryWriter();
+    const auto unknown = [&split](const char* what) { split.NoteMemoryWrite(0, ~u64{0}, what); };
+    if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
+        constexpr u32 base = MAXWELL3D_REG_INDEX(report_semaphore);
+        const GPUVAddr address = (GPUVAddr{fs.regs[base]} << 32) | fs.regs[base + 1];
+        Regs::ReportSemaphore query_regs{};
+        query_regs.query.raw = words[count - 1];
+        const auto device = memory_manager.GpuToCpuAddress(address);
+        if (!device) {
+            return; // CounterReport writes nothing at an unmapped address.
+        }
+        // A short payload release is a fence: written when the back runs it (fast fences).
+        if (query_regs.query.operation == Regs::ReportSemaphore::Operation::Release &&
+            query_regs.query.short_query != 0 &&
+            query_regs.query.report == Regs::ReportSemaphore::Report::Payload) {
+            const u32 payload = fs.regs[base + 2];
+            split.NoteMemoryWriteData(*device, &payload, 1);
+        } else {
+            split.NoteMemoryWrite(*device, 16, "3D report");
+        }
+        return;
+    }
+    constexpr u32 base = MAXWELL3D_REG_INDEX(upload);
+    if (method == MAXWELL3D_REG_INDEX(launch_dma)) {
+        const u64 line_length = fs.regs[base];
+        const u64 lines = (std::max)(fs.regs[base + 1], 1U);
+        const u64 pitch = (std::max<u64>)(fs.regs[base + 4], line_length);
+        const GPUVAddr address = (GPUVAddr{fs.regs[base + 2]} << 32) | fs.regs[base + 3];
+        const u64 size = pitch * (lines - 1) + line_length;
+        const auto device = memory_manager.GpuToCpuAddress(address);
+        // LAUNCH_DMA: bit 0 pitch (linear) layout, bits 5:4 completion (2 releases a semaphore).
+        const u32 launch = words[count - 1];
+        const bool linear = (launch & 1) != 0;
+        if (((launch >> 4) & 3) == 2) {
+            unknown("upload release");
+        }
+        fs.upload_known = device && linear && lines == 1 && (*device & 3) == 0 &&
+                          memory_manager.GpuToCpuAddress(address + size - 1) ==
+                              *device + size - 1;
+        fs.upload_device = device.value_or(0);
+        fs.upload_size = static_cast<u32>((std::min<u64>)(size, ~0U));
+        fs.upload_offset = 0;
+        if (!fs.upload_known) {
+            if (!device || size == 0 || size > (u64{64} << 20)) {
+                return unknown("upload unmapped or huge");
+            }
+            split.NoteMemoryWrite(*device, size, "upload (not linear)");
+        }
+        return;
+    }
+    // inline_data words of the current upload.
+    if (!fs.upload_known) {
+        const auto device = memory_manager.GpuToCpuAddress(
+            (GPUVAddr{fs.regs[base + 2]} << 32) | fs.regs[base + 3]);
+        if (!device) {
+            return unknown("upload data unmapped");
+        }
+        split.NoteMemoryWrite(*device, fs.regs[base] * u64{(std::max)(fs.regs[base + 1], 1U)} +
+                                           u64{fs.regs[base + 4]} * fs.regs[base + 1],
+                              "upload data");
+        return;
+    }
+    const u32 remaining_bytes =
+        fs.upload_offset < fs.upload_size ? fs.upload_size - fs.upload_offset : 0;
+    const u32 whole = (std::min<u32>)(count, remaining_bytes / 4);
+    split.NoteMemoryWriteData(fs.upload_device + fs.upload_offset, words, whole);
+    if (whole < count && remaining_bytes % 4 != 0) {
+        split.NoteMemoryWrite(fs.upload_device + fs.upload_offset + whole * 4, remaining_bytes % 4);
+    }
+    fs.upload_offset += (std::min<u32>)(count * 4, remaining_bytes);
+}
+
 void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
                              u32 method, u32 count) {
     // The words may be written by methods still queued for the back (indirect draw arguments
@@ -1445,6 +1542,126 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     if (Tegra::Nx2CmdPageDiag::g_enabled) {
         diag_before.resize(words);
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
+    }
+    // EDEN_NX2_DMA_SNAPSHOT (EvilOOT's dma-snapshot fix): Ocarina reads an occlusion report for
+    // each object (macro 0xe2c, MME_DMA_READ_FIFOED), ~35,000 times a second, and its pages are
+    // GPU-written, so each read drained the back: the front and the back took turns. A drained
+    // read now flushes its whole device pages and remembers the split position; later reads of
+    // those pages skip the drain while nothing sent since may write them
+    // (GpuSplit::MayBeWrittenSince) and the query cache lists no report there. 10 also drains,
+    // reads again and logs differences.
+    const int snapshot_mode =
+        VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_dma_snapshot, "EDEN_NX2_DMA_SNAPSHOT",
+                                         9);
+    const auto flush_queries = [&](GPUVAddr begin, size_t bytes) {
+        split.Run(
+            [this, begin, bytes] {
+                VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, begin, bytes);
+            },
+            VideoCommon::DrainSite::MacroDmaFlush);
+    };
+    if (snapshot_mode >= 9 && !Tegra::Nx2CmdPageDiag::g_enabled &&
+        method == 0x158 && words != 0) {
+        const auto device = memory_manager.GpuToCpuAddress(source);
+        if (device &&
+            memory_manager.GpuToCpuAddress(source + read_bytes - 1) == *device + read_bytes - 1) {
+            static u64 hits{};
+            static u64 misses{};
+            static u64 differences{};
+            static u64 report_reads{};
+            static std::array<u64, 4> miss_reasons{};
+            const u64 first_page = *device >> 12;
+            const u64 last_page = (*device + read_bytes - 1) >> 12;
+            bool hit = true;
+            for (u64 page = first_page; page <= last_page && hit; ++page) {
+                const auto it = fs.dma_snapshots.find(page);
+                hit = it != fs.dma_snapshots.end() &&
+                      !split.MayBeWrittenSince(it->second, *device, read_bytes);
+                if (!hit) {
+                    // No snapshot, compute/copy sent since, unranged writer sent since, noted write.
+                    const u32 reason = it == fs.dma_snapshots.end()                   ? 0
+                                       : split.LastWriterPosition() > it->second   ? 1
+                                       : split.LastUnrangedPosition() > it->second ? 2
+                                                                                   : 3;
+                    ++miss_reasons[reason];
+                }
+            }
+            // A report's value is up to 8 bytes, listed by its first 4: look 12 bytes back. A
+            // listed report may not be in guest memory yet: take the drained path.
+            if (!hit || !rasterizer->HasCachedReports(*device - 12, u64{read_bytes} + 12)) {
+                thread_local std::vector<u32> snap_words;
+                snap_words.resize(words);
+                if (hit) {
+                    ++hits;
+                    memory_manager.ReadBlockUnsafe(source, snap_words.data(), read_bytes);
+                    if (snapshot_mode == 10) {
+                        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+                        if (memory_manager.IsMemoryDirty(source, read_bytes,
+                                                         VideoCommon::CacheType::BufferCache)) {
+                            split.Run(
+                                [memory = &memory_manager, source, read_bytes] {
+                                    memory->FlushRegion(source, read_bytes,
+                                                        VideoCommon::CacheType::BufferCache);
+                                },
+                                VideoCommon::DrainSite::MacroDmaFlush);
+                        }
+                        flush_queries(source, read_bytes);
+                        std::vector<u32> exact(words);
+                        memory_manager.ReadBlockUnsafe(source, exact.data(), read_bytes);
+                        if (exact != snap_words) {
+                            if (differences++ < 32) {
+                                LOG_WARNING(HW_GPU,
+                                            "DMA snapshot check: macro {:#x} read of {} words at "
+                                            "{:#x} differs from the drained read ({:#x} vs {:#x})",
+                                            macro, words, source, snap_words[0], exact[0]);
+                            }
+                            snap_words = std::move(exact);
+                        }
+                    }
+                } else {
+                    ++misses;
+                    // The GPU data of the whole pages (a flush of only the bytes read left stale
+                    // neighbours), the pending reports of the bytes read.
+                    const GPUVAddr flush_begin = source & ~GPUVAddr{0xfff};
+                    const GPUVAddr flush_end = (source + read_bytes + 0xfff) & ~GPUVAddr{0xfff};
+                    const size_t flush_bytes = static_cast<size_t>(flush_end - flush_begin);
+                    split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+                    if (memory_manager.IsMemoryDirty(flush_begin, flush_bytes,
+                                                     VideoCommon::CacheType::BufferCache)) {
+                        split.Run(
+                            [memory = &memory_manager, flush_begin, flush_bytes] {
+                                memory->FlushRegion(flush_begin, flush_bytes,
+                                                    VideoCommon::CacheType::BufferCache);
+                            },
+                            VideoCommon::DrainSite::MacroDmaFlush);
+                    }
+                    flush_queries(source, read_bytes);
+                    if (fs.dma_snapshots.size() > 8192) {
+                        fs.dma_snapshots.clear();
+                    }
+                    for (u64 page = first_page; page <= last_page; ++page) {
+                        fs.dma_snapshots[page] = split.SentPosition();
+                    }
+                    memory_manager.ReadBlockUnsafe(source, snap_words.data(), read_bytes);
+                }
+                static auto last_log = std::chrono::steady_clock::now();
+                if (const auto now = std::chrono::steady_clock::now();
+                    now - last_log >= std::chrono::seconds{5}) {
+                    last_log = now;
+                    LOG_INFO(HW_GPU,
+                             "DMA snapshot: {} reads skipped the drain, {} drained, {} differed, "
+                             "{} reads of listed reports (drained path); misses: {} new page, {} "
+                             "compute/copy, {} unranged, {} noted write",
+                             hits, misses, differences, report_reads, miss_reasons[0],
+                             miss_reasons[1], miss_reasons[2], miss_reasons[3]);
+                }
+                for (u32 i = 0; i < words; ++i) {
+                    fs.parameters.push_back(snap_words[i]);
+                }
+                return;
+            }
+            ++report_reads;
+        }
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
     split.Drain(VideoCommon::DrainSite::MacroDmaRead);

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -17,6 +19,40 @@
 /// them at the end of each presented frame, so every cache they touch is used from its owner.
 /// Without the server nothing is posted and the per-frame cost is one relaxed atomic load.
 namespace VideoCore::Nx2Debug {
+
+/// Read an integer environment variable as a switch
+[[nodiscard]] inline int EnvSwitch(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? 0 : std::atoi(value);
+}
+
+/// The switch's value, read from the environment on first use (-1: not read yet). Static
+/// initialization ran before the frontend applied nx2_switches.txt, so those settings were lost.
+[[nodiscard]] inline int SwitchValue(std::atomic<int>& value, const char* name,
+                                     int fallback = 0) {
+    int current = value.load(std::memory_order_relaxed);
+    if (current < 0) [[unlikely]] {
+        int unset = -1;
+        const int initial = std::getenv(name) != nullptr ? EnvSwitch(name) : fallback;
+        value.compare_exchange_strong(unset, initial, std::memory_order_relaxed);
+        current = value.load(std::memory_order_relaxed);
+    }
+    return current;
+}
+
+/// EDEN_NX2_DMA_SNAPSHOT (from EvilOOT's dma-snapshot fix): macro DMA reads of pages a drained
+/// read flushed whole skip the drain while nothing sent since may write them (Maxwell3D::
+/// FrontDmaRead). 9 = on (default: Lake Hylia 46.5 -> 52.3 fps; verify 0 differences in 235k
+/// reads), 10 = on and verify every skipped read against the drained path, 0 = off.
+inline std::atomic<int> g_dma_snapshot{-1};
+
+/// The live switch called `name`, or null.
+[[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
+    if (name == "EDEN_NX2_DMA_SNAPSHOT") {
+        return &g_dma_snapshot;
+    }
+    return nullptr;
+}
 
 struct CaptureRequest {
     u64 id;

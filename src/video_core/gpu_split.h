@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -175,6 +176,80 @@ public:
     /// of it was still queued.
     bool WaitForSync();
 
+    /// memory-writing work whose range the front does not note was just sent (KeplerMemory
+    /// and Fermi2D methods, syncpoint operations). Ends every macro DMA read snapshot.
+    void NoteUnrangedWriter() {
+        last_memory_writer_position = write_position;
+        last_unranged_position = write_position;
+    }
+    /// the ring position of everything sent so far.
+    [[nodiscard]] u64 SentPosition() const {
+        return write_position;
+    }
+    /// the last compute/copy and unranged writer positions.
+    [[nodiscard]] u64 LastWriterPosition() const {
+        return last_writer_position;
+    }
+    [[nodiscard]] u64 LastUnrangedPosition() const {
+        return last_unranged_position;
+    }
+    /// Other work that writes guest memory on the back was just sent: inline uploads, reports,
+    /// puller methods (semaphores).
+    void NoteMemoryWriter() {
+        last_memory_writer_position = write_position;
+    }
+    /// Work that writes the device range [begin, begin + size) was just sent (an inline upload, a
+    /// report, a semaphore release). size ~0 means an unknown range.
+    void NoteMemoryWrite(u64 begin, u64 size, const char* what = "unknown") {
+        PendingWrite& write = pending_writes[pending_write_count++ % pending_writes.size()];
+        write.what = what;
+        write.begin = begin;
+        write.end = size == ~u64{0} ? ~u64{0} : begin + size;
+        write.position = write_position;
+        write.words = 0;
+    }
+    /// As NoteMemoryWrite, for a write whose words the front knows (a fence release payload,
+    /// linear inline upload data): reads overlay them instead of waiting.
+    void NoteMemoryWriteData(u64 begin, const u32* data, u32 words) {
+        while (words != 0) {
+            const u32 count = (std::min<u32>)(words, PendingWriteWords);
+            PendingWrite& write = pending_writes[pending_write_count++ % pending_writes.size()];
+            write.what = "known";
+            write.begin = begin;
+            write.end = begin + u64{count} * sizeof(u32);
+            write.position = write_position;
+            write.words = count;
+            std::memcpy(write.data.data(), data, count * sizeof(u32));
+            begin += u64{count} * sizeof(u32);
+            data += count;
+            words -= count;
+        }
+    }
+    /// whether work sent after position `since` may write device bytes
+    /// [begin, begin + size): compute or copies (any range), unranged writers, or a noted write
+    /// that overlaps the range. Also true when more writes were noted since than are remembered.
+    [[nodiscard]] bool MayBeWrittenSince(u64 since, u64 begin, u64 size) const {
+        if (last_writer_position > since || last_unranged_position > since) {
+            return true;
+        }
+        if (last_memory_writer_position <= since) {
+            return false;
+        }
+        const u64 end = begin + size;
+        const u64 remembered = (std::min<u64>)(pending_write_count, pending_writes.size());
+        for (u64 scanned = 0; scanned < remembered; ++scanned) {
+            const PendingWrite& write =
+                pending_writes[(pending_write_count - 1 - scanned) % pending_writes.size()];
+            if (write.position <= since) {
+                return false;
+            }
+            if (write.begin < end && begin < write.end) {
+                return true;
+            }
+        }
+        return remembered == pending_writes.size();
+    }
+
 private:
     friend struct GpuSplitTestAccess;
 
@@ -246,6 +321,19 @@ private:
     // Front side.
     u64 write_position{};
     u64 last_writer_position{};
+    u64 last_memory_writer_position{};
+    u64 last_unranged_position{};
+    static constexpr u32 PendingWriteWords = 8;
+    struct PendingWrite {
+        u64 begin;
+        u64 end;
+        u64 position;
+        u32 words; ///< Known words from begin, or 0 (unknown contents)
+        const char* what;
+        std::array<u32, PendingWriteWords> data;
+    };
+    std::array<PendingWrite, 8192> pending_writes{};
+    u64 pending_write_count{};
     u64 last_sync_position{};
     u64 published_local{};
     u64 consumed_cache{};
