@@ -1572,15 +1572,16 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             static std::array<u64, 4> miss_reasons{};
             const u64 first_page = *device >> 12;
             const u64 last_page = (*device + read_bytes - 1) >> 12;
+            const bool check_compute = (snapshot_mode == 11);
             bool hit = true;
             for (u64 page = first_page; page <= last_page && hit; ++page) {
                 const auto it = fs.dma_snapshots.find(page);
                 hit = it != fs.dma_snapshots.end() &&
-                      !split.MayBeWrittenSince(it->second, *device, read_bytes);
+                      !split.MayBeWrittenSince(it->second, *device, read_bytes, check_compute);
                 if (!hit) {
                     // No snapshot, compute/copy sent since, unranged writer sent since, noted write.
                     const u32 reason = it == fs.dma_snapshots.end()                   ? 0
-                                       : split.LastWriterPosition() > it->second   ? 1
+                                       : (check_compute && split.LastWriterPosition() > it->second) ? 1
                                        : split.LastUnrangedPosition() > it->second ? 2
                                                                                    : 3;
                     ++miss_reasons[reason];
